@@ -1,0 +1,55 @@
+{
+  "defaultProvider": "openai-api-key",
+  "defaultModel": "gpt-4.1-mini",
+  "models": ["gpt-4.1-mini", "gpt-4.1"],
+  "providers": {
+    "openai-api-key": {
+      "type": "openai-api-key",
+      "displayName": "OpenAI API Key Provider",
+      "baseUrl": "https://api.openai.com/v1",
+      "apiKeyEnv": "OPENAI_API_KEY",
+      "localOnly": false
+    }
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8787,
+    "requireAuth": true,
+    "apiKeys": ["replace-with-brain-init-local-key"],
+    "publicBaseUrl": "http://127.0.0.1:8787",
+    "auditLogPath": "logs/brain-server-audit.jsonl"
+  },
+  "routing": {
+    "chat": {
+      "providerId": "openai-api-key",
+      "model": "gpt-4.1-mini"
+    },
+    "fast": {
+      "providerId": "openai-api-key",
+      "model": "gpt-4.1-mini"
+    },
+    "code": {
+      "providerId": "openai-api-key",
+      "model": "gpt-4.1"
+    },
+    "tool-use": {
+      "providerId": "openai-api-key",
+      "model": "gpt-4.1"
+    }
+  },
+  "tools": {
+    "enabled": true,
+    "allowlist": [],
+    "maxToolCalls": 4
+  },
+  "memory": {
+    "mode": "session",
+    "maxSessionMessages": 20
+  },
+  "policy": {
+    "allowNetworkModelCalls": true,
+    "allowExperimentalSubscriptionLogin": false,
+    "allowProductStateInPrompt": true,
+    "requireToolAllowlist": true
+  }
+}

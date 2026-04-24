@@ -1,0 +1,22 @@
+{
+  "name": "local-brain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local OpenAI-compatible brain gateway backed by local providers such as Codex ChatGPT login.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node --experimental-strip-types src/tools/brain-start.ts",
+    "check": "npm run brain-config-check -- docs/brain.config.example.json && npm run brain-smoketest",
+    "brain-smoketest": "node --experimental-strip-types src/tools/brain-smoketest.ts",
+    "brain-config-check": "node --experimental-strip-types src/tools/brain-config-check.ts",
+    "brain-init-local": "node --experimental-strip-types src/tools/brain-init-local.ts",
+    "brain-codex-status": "node --experimental-strip-types src/tools/brain-codex-status.ts",
+    "brain-server": "node --experimental-strip-types src/tools/brain-server.ts",
+    "brain-start": "node --experimental-strip-types src/tools/brain-start.ts",
+    "build-app": "zsh scripts/build-menubar-app.sh",
+    "package-dmg": "zsh scripts/package-dmg.sh"
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "defaultProvider": "codex-chatgpt-local",
+  "defaultModel": "gpt-5.4-mini",
+  "models": ["gpt-5.4-mini", "gpt-5.4"],
+  "providers": {
+    "codex-chatgpt-local": {
+      "type": "codex-chatgpt-local",
+      "displayName": "Codex ChatGPT Local Provider",
+      "baseUrl": "https://chatgpt.com/backend-api/codex/responses",
+      "localOnly": false,
+      "experimental": true,
+      "options": {
+        "authPath": "/Users/wf/.codex/auth.json",
+        "clientId": "app_EMoamEEZ73f0CkXaXp7hrann",
+        "userAgent": "brain-local-codex-provider/0.1"
+      }
+    }
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8787,
+    "requireAuth": true,
+    "apiKeys": ["local-brain-dev-key"],
+    "publicBaseUrl": "http://127.0.0.1:8787",
+    "auditLogPath": "logs/brain-server-audit.jsonl"
+  },
+  "routing": {
+    "chat": {
+      "providerId": "codex-chatgpt-local",
+      "model": "gpt-5.4-mini"
+    },
+    "fast": {
+      "providerId": "codex-chatgpt-local",
+      "model": "gpt-5.4-mini"
+    },
+    "code": {
+      "providerId": "codex-chatgpt-local",
+      "model": "gpt-5.4"
+    },
+    "tool-use": {
+      "providerId": "codex-chatgpt-local",
+      "model": "gpt-5.4"
+    }
+  },
+  "tools": {
+    "enabled": false,
+    "allowlist": [],
+    "maxToolCalls": 0
+  },
+  "memory": {
+    "mode": "session",
+    "maxSessionMessages": 20
+  },
+  "policy": {
+    "allowNetworkModelCalls": true,
+    "allowExperimentalSubscriptionLogin": true,
+    "allowProductStateInPrompt": true,
+    "requireToolAllowlist": true
+  }
+}

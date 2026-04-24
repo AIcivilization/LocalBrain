@@ -1,0 +1,70 @@
+{
+  "defaultProvider": "mock-local",
+  "defaultModel": "local-mock-model",
+  "models": ["local-mock-model", "local-mock-fast", "local-mock-tool"],
+  "providers": {
+    "mock-local": {
+      "type": "mock",
+      "displayName": "Mock Local Brain Provider",
+      "localOnly": true
+    },
+    "openai-api-key": {
+      "type": "openai-api-key",
+      "displayName": "OpenAI API Key Provider",
+      "apiKeyEnv": "OPENAI_API_KEY",
+      "localOnly": false,
+      "disabled": true
+    },
+    "local-ai-gateway": {
+      "type": "custom-http",
+      "displayName": "Local AI Gateway",
+      "baseUrl": "http://127.0.0.1:8787/brain/generate",
+      "localOnly": true,
+      "disabled": true
+    },
+    "chatgpt-subscription-local-experimental": {
+      "type": "chatgpt-subscription-experimental",
+      "displayName": "ChatGPT Subscription Local Experimental Adapter",
+      "localOnly": false,
+      "experimental": true,
+      "disabled": true
+    }
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8787,
+    "requireAuth": true,
+    "apiKeys": ["local-brain-dev-key"],
+    "publicBaseUrl": "http://127.0.0.1:8787",
+    "auditLogPath": "logs/brain-server-audit.jsonl"
+  },
+  "routing": {
+    "chat": {
+      "providerId": "mock-local",
+      "model": "local-mock-model"
+    },
+    "fast": {
+      "providerId": "mock-local",
+      "model": "local-mock-fast"
+    },
+    "tool-use": {
+      "providerId": "mock-local",
+      "model": "local-mock-tool"
+    }
+  },
+  "tools": {
+    "enabled": true,
+    "allowlist": ["echo"],
+    "maxToolCalls": 4
+  },
+  "memory": {
+    "mode": "session",
+    "maxSessionMessages": 20
+  },
+  "policy": {
+    "allowNetworkModelCalls": false,
+    "allowExperimentalSubscriptionLogin": false,
+    "allowProductStateInPrompt": true,
+    "requireToolAllowlist": true
+  }
+}

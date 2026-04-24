@@ -1,0 +1,15 @@
+.DS_Store
+node_modules/
+
+# Local runtime state. These files can contain local API keys, audit data, and machine-specific paths.
+logs/*
+!logs/.gitkeep
+
+# Built macOS app and release packages are generated artifacts.
+LocalBrain.app/
+*.dmg
+
+# Local editor/system files.
+.idea/
+.vscode/
+*.swp
