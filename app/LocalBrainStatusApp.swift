@@ -101,7 +101,13 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
     }
 
     private func configureStatusButton() {
-        if let image = NSImage(systemSymbolName: "brain.head.profile", accessibilityDescription: "LocalBrain") {
+        if let image = Bundle.main.image(forResource: "LocalBrainStatus") ?? NSImage(named: "LocalBrain") {
+            image.size = NSSize(width: 20, height: 20)
+            image.isTemplate = false
+            statusItem.button?.image = image
+            statusItem.button?.title = ""
+            statusItem.button?.imagePosition = .imageOnly
+        } else if let image = NSImage(systemSymbolName: "brain.head.profile", accessibilityDescription: "LocalBrain") {
             image.isTemplate = true
             statusItem.button?.image = image
             statusItem.button?.title = ""

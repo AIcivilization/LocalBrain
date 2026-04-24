@@ -7,6 +7,7 @@ CONTENTS="$APP/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
 RUNTIME="$RESOURCES/runtime"
+ICONSET="$RESOURCES/LocalBrain.iconset"
 
 rm -rf "$APP"
 mkdir -p "$MACOS" "$RESOURCES" "$RUNTIME"
@@ -51,7 +52,9 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-/bin/cp "/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/Actions.icns" "$RESOURCES/LocalBrain.icns"
+swift "$ROOT/scripts/make-app-icon.swift" "$ICONSET" "$RESOURCES/LocalBrainStatus.png"
+/usr/bin/iconutil -c icns "$ICONSET" -o "$RESOURCES/LocalBrain.icns"
+/bin/rm -rf "$ICONSET"
 
 /usr/bin/ditto "$ROOT/app" "$RUNTIME/app"
 /usr/bin/ditto "$ROOT/docs" "$RUNTIME/docs"

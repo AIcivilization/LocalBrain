@@ -87,7 +87,6 @@ export class OpenCodeLocalBrainProvider implements BrainProvider {
       .map((line) => line.trim())
       .filter(Boolean)
       .filter((line) => line.startsWith(`${this.modelProvider}/`))
-      .filter((id) => id.endsWith('-free') || id === `${this.modelProvider}/gpt-5-nano`)
       .map((id) => ({
         id,
         providerId: this.id,
