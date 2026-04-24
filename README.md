@@ -25,7 +25,7 @@ The menu contains:
 
 - `Configure Codex`: checks whether local Codex ChatGPT login is available
 - `Configure OpenCode`: opens OpenCode login/setup when the local OpenCode provider needs attention
-- `Model`: selects the default model, including Codex models and discovered OpenCode free models
+- `Model`: selects the default model, including Codex models, discovered OpenCode models, and discovered OpenAI-compatible models when configured
 - `Key`: copies `OPENAI_BASE_URL`, copies local API keys, generates new keys, and rotates keys
 - `Settings`: switches language, opens the web console, config file, audit log, refreshes status, or restarts/stops LocalBrain
 - `Quit`: exits LocalBrain from the bottom of the main menu
@@ -130,6 +130,8 @@ List discovered OpenCode models:
 /Users/wf/.opencode/bin/opencode models opencode
 ```
 
+OpenAI-compatible providers discover models from their upstream `/models` endpoint when their API key environment variable is available.
+
 Build the macOS app:
 
 ```bash
@@ -156,6 +158,7 @@ LocalBrain is intended for local personal testing and development.
 - It stores generated local API keys in local config files under `logs/`.
 - It does not commit local runtime keys, audit logs, built app bundles, or DMG files.
 - It reads local Codex auth state only when the Codex provider is used.
+- It asks OpenAI-compatible upstreams for their current `/models` list when an API key is configured.
 - It asks the OpenCode CLI for available free models when the OpenCode provider is configured.
 - It uses the OpenCode CLI directly for OpenCode requests, with local server mode kept as a fallback.
 - Codex/ChatGPT subscription-backed behavior is for local testing, not for production redistribution.

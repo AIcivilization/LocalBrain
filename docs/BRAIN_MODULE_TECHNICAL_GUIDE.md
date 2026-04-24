@@ -191,13 +191,29 @@ Provider implementations are the only boundary between the Brain and model servi
 Built-in providers:
 
 - `mock`: local test provider, no network calls
-- `openai-api-key`: OpenAI-compatible upstream using `OPENAI_API_KEY`
+- `openai-api-key`: OpenAI-compatible upstream using `OPENAI_API_KEY`, with model discovery through `/models`
 - `codex-chatgpt-local`: reads local Codex auth and calls the ChatGPT Codex backend
 - `opencode-local`: uses the local OpenCode CLI and discovers free OpenCode models dynamically
 - `custom-http`: forwards standard Brain requests to an external AI gateway
 - `chatgpt-subscription-experimental`: local testing adapter boundary, disabled by default
 
 Production products should prefer API-key, AI gateway, or approved provider integrations. The Codex/ChatGPT and OpenCode local providers are for personal local testing.
+
+## OpenAI-Compatible Provider
+
+The OpenAI-compatible provider discovers models at runtime from the upstream endpoint:
+
+```text
+GET {baseUrl}/models
+```
+
+For the default OpenAI provider example, that means:
+
+```text
+GET https://api.openai.com/v1/models
+```
+
+The provider uses the configured `apiKeyEnv` value, usually `OPENAI_API_KEY`, for the bearer token. LocalBrain caches the discovered model list briefly so the menu stays responsive, then refreshes it again later. Static `models` in config are only a fallback and are not required for OpenAI-compatible providers.
 
 ## Codex ChatGPT Local Provider
 
@@ -241,13 +257,13 @@ Prerequisite:
 /Users/wf/.opencode/bin/opencode auth login
 ```
 
-List the currently available OpenCode free models:
+List the currently available OpenCode models:
 
 ```bash
 /Users/wf/.opencode/bin/opencode models opencode
 ```
 
-LocalBrain uses that command for dynamic model discovery. The model menu is not hardcoded; models returned by OpenCode with the `-free` suffix, plus `opencode/gpt-5-nano`, are exposed through:
+LocalBrain uses that command for dynamic model discovery. The model menu is not hardcoded; model IDs returned by OpenCode are exposed through:
 
 ```text
 GET /brain/local-state

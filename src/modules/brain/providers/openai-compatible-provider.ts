@@ -1,4 +1,5 @@
 import type {
+  BrainModelDescriptor,
   BrainProvider,
   BrainProviderDescriptor,
   BrainProviderRequest,
@@ -41,6 +42,14 @@ interface OpenAICompatibleResponse {
   };
 }
 
+interface OpenAIModelsResponse {
+  data?: Array<{
+    id?: string;
+    object?: string;
+    owned_by?: string;
+  }>;
+}
+
 export class OpenAICompatibleBrainProvider implements BrainProvider {
   readonly id: string;
   readonly kind: 'openai-api-key' | 'vercel-ai-sdk';
@@ -49,6 +58,10 @@ export class OpenAICompatibleBrainProvider implements BrainProvider {
   private readonly displayName: string;
   private readonly localOnly: boolean;
   private readonly experimental: boolean;
+  private modelCache?: {
+    expiresAt: number;
+    models: BrainModelDescriptor[];
+  };
 
   constructor(options: OpenAICompatibleBrainProviderOptions) {
     this.id = options.id;
@@ -140,6 +153,46 @@ export class OpenAICompatibleBrainProvider implements BrainProvider {
       },
       raw: payload,
     };
+  }
+
+  async listModels(): Promise<BrainModelDescriptor[]> {
+    const now = Date.now();
+    if (this.modelCache && this.modelCache.expiresAt > now) {
+      return this.modelCache.models;
+    }
+
+    const apiKey = process.env[this.apiKeyEnv];
+    if (!apiKey) {
+      throw new Error(`missing API key env for OpenAI-compatible provider ${this.id}: ${this.apiKeyEnv}`);
+    }
+
+    const response = await fetch(`${this.baseUrl}/models`, {
+      method: 'GET',
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+      },
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`OpenAI-compatible provider ${this.id} model discovery failed: ${response.status} ${text}`);
+    }
+
+    const payload = await response.json() as OpenAIModelsResponse;
+    const models = (payload.data ?? [])
+      .map((model) => model.id)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0)
+      .sort((left, right) => left.localeCompare(right))
+      .map((id) => ({
+        id,
+        providerId: this.id,
+        displayName: id,
+      }));
+
+    this.modelCache = {
+      expiresAt: now + 60_000,
+      models,
+    };
+    return models;
   }
 }
 

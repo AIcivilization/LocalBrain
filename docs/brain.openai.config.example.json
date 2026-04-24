@@ -1,7 +1,6 @@
 {
   "defaultProvider": "openai-api-key",
   "defaultModel": "gpt-4.1-mini",
-  "models": ["gpt-4.1-mini", "gpt-4.1"],
   "providers": {
     "openai-api-key": {
       "type": "openai-api-key",
