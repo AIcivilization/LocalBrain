@@ -10,4 +10,5 @@ export { CustomHttpBrainProvider } from './providers/custom-http-provider.ts';
 export { ExperimentalSubscriptionBrainProvider } from './providers/experimental-subscription-provider.ts';
 export { MockBrainProvider } from './providers/mock-provider.ts';
 export { OpenAICompatibleBrainProvider } from './providers/openai-compatible-provider.ts';
+export { OpenCodeLocalBrainProvider } from './providers/opencode-local-provider.ts';
 export type * from './types.ts';

@@ -14,6 +14,7 @@ export type BrainProviderKind =
   | 'openai-api-key'
   | 'vercel-ai-sdk'
   | 'custom-http'
+  | 'opencode-local'
   | 'codex-chatgpt-local'
   | 'chatgpt-subscription-experimental';
 
@@ -72,6 +73,7 @@ export interface BrainProvider {
   kind: BrainProviderKind;
   describe(): BrainProviderDescriptor;
   generate(request: BrainProviderRequest): Promise<BrainProviderResponse>;
+  listModels?(): Promise<BrainModelDescriptor[]>;
 }
 
 export interface BrainProviderDescriptor {
@@ -82,6 +84,13 @@ export interface BrainProviderDescriptor {
   supportsTools: boolean;
   localOnly: boolean;
   experimental: boolean;
+}
+
+export interface BrainModelDescriptor {
+  id: string;
+  providerId?: string;
+  displayName?: string;
+  free?: boolean;
 }
 
 export interface BrainToolDefinition {

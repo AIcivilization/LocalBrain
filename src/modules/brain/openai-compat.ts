@@ -214,28 +214,18 @@ export function brainToOpenAIResponse(response: BrainProductResponse): Record<st
 }
 
 export function modelsResponse(
-  registry: BrainProviderRegistry,
+  _registry: BrainProviderRegistry,
   defaultModel: string,
   availableModels: string[] = [defaultModel],
 ): Record<string, unknown> {
-  const providerModels = registry.list().flatMap((provider) => availableModels.map((model) => ({
-    id: `${provider.id}/${model}`,
-    object: 'model',
-    created: 0,
-    owned_by: provider.id,
-  })));
-
   return {
     object: 'list',
-    data: [
-      ...availableModels.map((model) => ({
-        id: model,
-        object: 'model',
-        created: 0,
-        owned_by: model === defaultModel ? 'brain-default' : 'brain',
-      })),
-      ...providerModels,
-    ],
+    data: availableModels.map((model) => ({
+      id: model,
+      object: 'model',
+      created: 0,
+      owned_by: model === defaultModel ? 'brain-default' : 'brain',
+    })),
   };
 }
 

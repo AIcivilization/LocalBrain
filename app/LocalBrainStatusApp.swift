@@ -84,6 +84,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
     private func refreshState() {
         var state = fetchJSON(url: "http://127.0.0.1:8787/brain/local-state") ?? [:]
         state["codex"] = codexStatus()
+        state["opencode"] = opencodeStatus(state: state)
         lastState = state
         updateStatusTitle()
         rebuildMenu()
@@ -92,9 +93,10 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
     private func updateStatusTitle() {
         let serviceOK = (lastState["ok"] as? Bool) == true
         let codexOK = ((lastState["codex"] as? [String: Any])?["ok"] as? Bool) == true
-        statusItem.button?.toolTip = serviceOK && codexOK ? text("LocalBrain: running", "LocalBrain\u{FF1A}\u{8FD0}\u{884C}\u{4E2D}") : text("LocalBrain: attention needed", "LocalBrain\u{FF1A}\u{9700}\u{8981}\u{5904}\u{7406}")
+        let opencodeOK = ((lastState["opencode"] as? [String: Any])?["ok"] as? Bool) == true
+        statusItem.button?.toolTip = serviceOK && codexOK && opencodeOK ? text("LocalBrain: running", "LocalBrain\u{FF1A}\u{8FD0}\u{884C}\u{4E2D}") : text("LocalBrain: attention needed", "LocalBrain\u{FF1A}\u{9700}\u{8981}\u{5904}\u{7406}")
         if statusItem.button?.image == nil {
-            statusItem.button?.title = serviceOK && codexOK ? "LB" : "LB!"
+            statusItem.button?.title = serviceOK && codexOK && opencodeOK ? "LB" : "LB!"
         }
     }
 
@@ -116,14 +118,21 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         let serviceOK = (lastState["ok"] as? Bool) == true
         let codex = lastState["codex"] as? [String: Any] ?? [:]
         let codexOK = (codex["ok"] as? Bool) == true
+        let opencode = lastState["opencode"] as? [String: Any] ?? [:]
+        let opencodeOK = (opencode["ok"] as? Bool) == true
 
         menu.addItem(coloredItem(title: serviceOK ? text("● LocalBrain: running", "\u{25CF} LocalBrain\u{FF1A}\u{8FD0}\u{884C}\u{4E2D}") : text("● LocalBrain: not running", "\u{25CF} LocalBrain\u{FF1A}\u{672A}\u{8FD0}\u{884C}"), ok: serviceOK))
         menu.addItem(coloredItem(title: codexOK ? text("● Codex: ready", "\u{25CF} Codex\u{FF1A}\u{53EF}\u{7528}") : text("● Codex: setup needed", "\u{25CF} Codex\u{FF1A}\u{9700}\u{8981}\u{914D}\u{7F6E}"), ok: codexOK))
+        menu.addItem(coloredItem(title: opencodeOK ? text("● OpenCode: ready", "\u{25CF} OpenCode\u{FF1A}\u{53EF}\u{7528}") : text("● OpenCode: setup needed", "\u{25CF} OpenCode\u{FF1A}\u{9700}\u{8981}\u{914D}\u{7F6E}"), ok: opencodeOK))
         menu.addItem(NSMenuItem.separator())
 
         let configure = NSMenuItem(title: text("Configure Codex", "\u{914D}\u{7F6E} Codex"), action: #selector(configureCodex), keyEquivalent: "")
         configure.target = self
         menu.addItem(configure)
+
+        let configureOpenCode = NSMenuItem(title: text("Configure OpenCode", "\u{914D}\u{7F6E} OpenCode"), action: #selector(configureOpenCode), keyEquivalent: "")
+        configureOpenCode.target = self
+        menu.addItem(configureOpenCode)
 
         let modelRoot = NSMenuItem(title: text("Model", "\u{6A21}\u{578B}"), action: nil, keyEquivalent: "")
         modelRoot.submenu = modelMenu()
@@ -233,6 +242,22 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         let command = "cd \(shellQuote(projectRoot.path)); codex"
         runAppleScript("tell application \"Terminal\" to do script \(appleScriptString(command))")
         showAlert(title: text("Complete Codex login", "\u{8BF7}\u{5B8C}\u{6210} Codex \u{767B}\u{5F55}"), message: text("Terminal has been opened. In Codex, choose Sign in with ChatGPT, then return to LocalBrain and refresh status.", "\u{5DF2}\u{6253}\u{5F00}\u{7EC8}\u{7AEF}\u{3002}\u{8BF7}\u{5728} Codex \u{4E2D}\u{9009}\u{62E9} Sign in with ChatGPT\u{FF0C}\u{5B8C}\u{6210}\u{540E}\u{56DE}\u{5230} LocalBrain \u{5237}\u{65B0}\u{72B6}\u{6001}\u{3002}"))
+    }
+
+    @objc private func configureOpenCode() {
+        let status = opencodeStatus(state: lastState)
+        if (status["ok"] as? Bool) == true {
+            showAlert(title: text("OpenCode is ready", "OpenCode \u{5DF2}\u{53EF}\u{7528}"), message: text("LocalBrain can discover OpenCode free models.", "LocalBrain \u{5DF2}\u{53EF}\u{53D1}\u{73B0} OpenCode \u{514D}\u{8D39}\u{6A21}\u{578B}\u{3002}"))
+            refreshState()
+            return
+        }
+
+        let opencodePath = findOpenCode() ?? "/Users/wf/.opencode/bin/opencode"
+        let command = FileManager.default.isExecutableFile(atPath: opencodePath)
+            ? "\(shellQuote(opencodePath)) auth login"
+            : "echo 'OpenCode CLI was not found. Install OpenCode first, then return to LocalBrain.'"
+        runAppleScript("tell application \"Terminal\" to do script \(appleScriptString(command))")
+        showAlert(title: text("Complete OpenCode setup", "\u{8BF7}\u{5B8C}\u{6210} OpenCode \u{914D}\u{7F6E}"), message: text("Terminal has been opened. Complete OpenCode login, then return to LocalBrain and refresh status.", "\u{5DF2}\u{6253}\u{5F00}\u{7EC8}\u{7AEF}\u{3002}\u{8BF7}\u{5B8C}\u{6210} OpenCode \u{767B}\u{5F55}\u{FF0C}\u{7136}\u{540E}\u{56DE}\u{5230} LocalBrain \u{5237}\u{65B0}\u{72B6}\u{6001}\u{3002}"))
     }
 
     @objc private func openConsole() {
@@ -345,6 +370,16 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
             "authMode": json["auth_mode"] as? String ?? "unknown",
             "hasAccessToken": tokens["access_token"] is String,
             "hasRefreshToken": tokens["refresh_token"] is String
+        ]
+    }
+
+    private func opencodeStatus(state: [String: Any]) -> [String: Any] {
+        let models = state["availableModels"] as? [String] ?? []
+        let hasFreeModels = models.contains { $0.hasPrefix("opencode/") }
+        return [
+            "ok": findOpenCode() != nil && hasFreeModels,
+            "hasCli": findOpenCode() != nil,
+            "hasFreeModels": hasFreeModels
         ]
     }
 
@@ -492,6 +527,15 @@ private func findNpm() -> String? {
         "/usr/local/opt/node/bin/npm",
         "/usr/local/bin/npm",
         "/usr/bin/npm"
+    ]
+    return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+}
+
+private func findOpenCode() -> String? {
+    let candidates = [
+        "/Users/wf/.opencode/bin/opencode",
+        "/opt/homebrew/bin/opencode",
+        "/usr/local/bin/opencode"
     ]
     return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
 }

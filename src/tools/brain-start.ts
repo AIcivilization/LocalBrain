@@ -48,6 +48,7 @@ async function main(): Promise<void> {
 async function ensureLocalConfig(configPath: string, sourcePath: string): Promise<void> {
   try {
     await access(configPath);
+    await mergeConfigDefaults(configPath, sourcePath);
     return;
   } catch {
     // Create the config below.
@@ -73,6 +74,39 @@ async function ensureLocalConfig(configPath: string, sourcePath: string): Promis
   console.log('Created LocalBrain config');
   console.log(`Config:         ${configPath}`);
   console.log(`OPENAI_API_KEY  ${localKey}`);
+}
+
+async function mergeConfigDefaults(configPath: string, sourcePath: string): Promise<void> {
+  const current = JSON.parse(await readFile(configPath, 'utf8')) as BrainConfig;
+  const source = JSON.parse(await readFile(sourcePath, 'utf8')) as BrainConfig;
+  let changed = false;
+
+  const providers = { ...current.providers };
+  for (const [providerId, providerConfig] of Object.entries(source.providers)) {
+    if (!providers[providerId]) {
+      providers[providerId] = providerConfig;
+      changed = true;
+    }
+  }
+
+  const nextModels = new Set(current.models ?? []);
+  for (const model of source.models ?? []) {
+    if (!nextModels.has(model)) {
+      nextModels.add(model);
+      changed = true;
+    }
+  }
+
+  if (!changed) {
+    return;
+  }
+
+  const nextConfig: BrainConfig = {
+    ...current,
+    providers,
+    models: [...nextModels],
+  };
+  await writeFile(configPath, `${JSON.stringify(nextConfig, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
 }
 
 main().catch((error: unknown) => {

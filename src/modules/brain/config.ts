@@ -7,6 +7,7 @@ import { CustomHttpBrainProvider } from './providers/custom-http-provider.ts';
 import { ExperimentalSubscriptionBrainProvider } from './providers/experimental-subscription-provider.ts';
 import { MockBrainProvider } from './providers/mock-provider.ts';
 import { OpenAICompatibleBrainProvider } from './providers/openai-compatible-provider.ts';
+import { OpenCodeLocalBrainProvider } from './providers/opencode-local-provider.ts';
 import type {
   BrainConfig,
   BrainConfigValidationResult,
@@ -19,6 +20,7 @@ const PROVIDER_KINDS: BrainProviderKind[] = [
   'openai-api-key',
   'vercel-ai-sdk',
   'custom-http',
+  'opencode-local',
   'codex-chatgpt-local',
   'chatgpt-subscription-experimental',
 ];
@@ -171,6 +173,19 @@ function registerConfiguredProvider(
       endpoint: providerConfig.baseUrl,
       clientId: typeof providerConfig.options?.clientId === 'string' ? providerConfig.options.clientId : undefined,
       userAgent: typeof providerConfig.options?.userAgent === 'string' ? providerConfig.options.userAgent : undefined,
+    }));
+    return;
+  }
+
+  if (providerConfig.type === 'opencode-local') {
+    registry.register(new OpenCodeLocalBrainProvider({
+      id: providerId,
+      displayName: providerConfig.displayName,
+      baseUrl: providerConfig.baseUrl,
+      cliPath: typeof providerConfig.options?.cliPath === 'string' ? providerConfig.options.cliPath : undefined,
+      modelProvider: typeof providerConfig.options?.modelProvider === 'string' ? providerConfig.options.modelProvider : undefined,
+      passwordEnv: typeof providerConfig.options?.passwordEnv === 'string' ? providerConfig.options.passwordEnv : undefined,
+      experimental: providerConfig.experimental,
     }));
     return;
   }

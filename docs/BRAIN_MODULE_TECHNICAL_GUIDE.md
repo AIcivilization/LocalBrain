@@ -193,10 +193,11 @@ Built-in providers:
 - `mock`: local test provider, no network calls
 - `openai-api-key`: OpenAI-compatible upstream using `OPENAI_API_KEY`
 - `codex-chatgpt-local`: reads local Codex auth and calls the ChatGPT Codex backend
+- `opencode-local`: uses the local OpenCode CLI and discovers free OpenCode models dynamically
 - `custom-http`: forwards standard Brain requests to an external AI gateway
 - `chatgpt-subscription-experimental`: local testing adapter boundary, disabled by default
 
-Production products should prefer API-key, AI gateway, or approved provider integrations. The Codex/ChatGPT local provider is for personal local testing.
+Production products should prefer API-key, AI gateway, or approved provider integrations. The Codex/ChatGPT and OpenCode local providers are for personal local testing.
 
 ## Codex ChatGPT Local Provider
 
@@ -231,6 +232,53 @@ Security behavior:
 - refreshes access tokens only when necessary
 - writes refreshed tokens back atomically
 - intended for local personal testing, not production redistribution
+
+## OpenCode Local Provider
+
+Prerequisite:
+
+```bash
+/Users/wf/.opencode/bin/opencode auth login
+```
+
+List the currently available OpenCode free models:
+
+```bash
+/Users/wf/.opencode/bin/opencode models opencode
+```
+
+LocalBrain uses that command for dynamic model discovery. The model menu is not hardcoded; models returned by OpenCode with the `-free` suffix, plus `opencode/gpt-5-nano`, are exposed through:
+
+```text
+GET /brain/local-state
+GET /v1/models
+```
+
+When a local app selects a model whose ID starts with `opencode/`, LocalBrain routes that request to the `opencode-local` provider. Selecting the model from the macOS menu also persists `chat` and `fast` routing to the OpenCode provider.
+
+For generation, LocalBrain first uses the OpenCode CLI directly:
+
+```bash
+/Users/wf/.opencode/bin/opencode run --model opencode/gpt-5-nano --format json "..."
+```
+
+That avoids depending on a long-running OpenCode server. The `baseUrl` setting remains available as a fallback for machines that already run `opencode serve`.
+
+The default provider configuration is:
+
+```json
+"opencode-local": {
+  "type": "opencode-local",
+  "displayName": "OpenCode Local Provider",
+  "baseUrl": "http://127.0.0.1:4096",
+  "localOnly": true,
+  "experimental": true,
+  "options": {
+    "cliPath": "/Users/wf/.opencode/bin/opencode",
+    "modelProvider": "opencode"
+  }
+}
+```
 
 ## macOS Menu-Bar App
 

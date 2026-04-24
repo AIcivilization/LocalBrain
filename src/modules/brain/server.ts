@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { appendFile, mkdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import type { BrainConfig, BrainProductRequest, BrainServerConfig } from './types.ts';
+import type { BrainConfig, BrainModelDescriptor, BrainProductRequest, BrainServerConfig } from './types.ts';
 import type { BrainRuntime } from './brain-runtime.ts';
 import type { BrainProviderRegistry } from './provider-registry.ts';
 import {
@@ -86,10 +86,12 @@ export class BrainServer {
     }
 
     if (method === 'GET' && path === '/health') {
+      const models = await this.availableModelDescriptors();
       this.writeJson(response, 200, {
         ok: true,
         service: 'brain-server',
         defaultModel: this.options.config.defaultModel,
+        availableModels: models.map((model) => model.id),
         providers: this.options.registry.list().map((provider) => provider.describe()),
       });
       await this.audit(method, path, 200, startedAt);
@@ -103,7 +105,7 @@ export class BrainServer {
     }
 
     if (method === 'GET' && path === '/brain/local-state') {
-      this.writeJson(response, 200, this.localState());
+      this.writeJson(response, 200, await this.localState());
       await this.audit(method, path, 200, startedAt);
       return;
     }
@@ -114,7 +116,7 @@ export class BrainServer {
       this.writeJson(response, 200, {
         ok: true,
         key,
-        state: this.localState(),
+        state: await this.localState(),
       });
       await this.audit(method, path, 200, startedAt);
       return;
@@ -125,7 +127,7 @@ export class BrainServer {
       await this.setDefaultModel(body.model);
       this.writeJson(response, 200, {
         ok: true,
-        state: this.localState(),
+        state: await this.localState(),
       });
       await this.audit(method, path, 200, startedAt);
       return;
@@ -138,7 +140,8 @@ export class BrainServer {
     }
 
     if (method === 'GET' && path === '/v1/models') {
-      this.writeJson(response, 200, modelsResponse(this.options.registry, this.options.config.defaultModel, this.availableModels()));
+      const models = await this.availableModelDescriptors();
+      this.writeJson(response, 200, modelsResponse(this.options.registry, this.options.config.defaultModel, models.map((model) => model.id)));
       await this.audit(method, path, 200, startedAt);
       return;
     }
@@ -278,7 +281,8 @@ export class BrainServer {
     await appendFile(this.serverConfig.auditLogPath, `${JSON.stringify(entry)}\n`, 'utf8');
   }
 
-  private localState(): Record<string, unknown> {
+  private async localState(): Promise<Record<string, unknown>> {
+    const models = await this.availableModelDescriptors();
     return {
       ok: true,
       service: 'LocalBrain',
@@ -286,7 +290,8 @@ export class BrainServer {
       healthUrl: `${this.url()}/health`,
       configPath: this.options.configPath,
       defaultModel: this.options.config.defaultModel,
-      availableModels: this.availableModels(),
+      availableModels: models.map((model) => model.id),
+      availableModelDetails: models,
       providers: this.options.registry.list().map((provider) => provider.describe()),
       requireAuth: this.serverConfig.requireAuth,
       apiKeys: this.serverConfig.apiKeys,
@@ -315,23 +320,30 @@ export class BrainServer {
     if (!model) {
       throw new Error('model is required');
     }
-    const availableModels = this.availableModels();
-    if (!availableModels.includes(model)) {
+    const availableModels = await this.availableModelDescriptors();
+    const selectedModel = availableModels.find((candidate) => candidate.id === model);
+    if (!selectedModel) {
       throw new Error(`unsupported model: ${model}`);
     }
     if (!this.options.configPath) {
       throw new Error('cannot persist selected model because server was started without configPath');
     }
 
+    const providerId = selectedModel.providerId
+      ?? this.options.config.routing?.chat?.providerId
+      ?? this.options.config.defaultProvider;
+
     this.options.config.defaultModel = model;
     this.options.config.routing = {
       ...this.options.config.routing,
       chat: {
         ...this.options.config.routing?.chat,
+        providerId,
         model,
       },
       fast: {
         ...this.options.config.routing?.fast,
+        providerId,
         model,
       },
     };
@@ -339,26 +351,62 @@ export class BrainServer {
     await atomicWriteJson(this.options.configPath, this.options.config);
   }
 
-  private availableModels(): string[] {
-    const models = new Set<string>();
+  private async availableModelDescriptors(): Promise<BrainModelDescriptor[]> {
+    const models = new Map<string, BrainModelDescriptor>();
+    const addModel = (model: BrainModelDescriptor): void => {
+      const current = models.get(model.id);
+      models.set(model.id, {
+        ...current,
+        ...model,
+        providerId: model.providerId ?? current?.providerId,
+        displayName: model.displayName ?? current?.displayName ?? model.id,
+        free: model.free ?? current?.free,
+      });
+    };
+
     for (const model of this.options.config.models ?? []) {
-      models.add(model);
+      addModel({
+        id: model,
+        providerId: this.options.config.defaultProvider,
+        displayName: model,
+      });
     }
     if (this.options.config.defaultModel) {
-      models.add(this.options.config.defaultModel);
+      addModel({
+        id: this.options.config.defaultModel,
+        providerId: this.options.config.defaultProvider,
+        displayName: this.options.config.defaultModel,
+      });
     }
     for (const route of Object.values(this.options.config.routing ?? {})) {
       if (route?.model) {
-        models.add(route.model);
+        addModel({
+          id: route.model,
+          providerId: route.providerId ?? this.options.config.defaultProvider,
+          displayName: route.model,
+        });
       }
     }
-    for (const providerConfig of Object.values(this.options.config.providers)) {
+    for (const [providerId, providerConfig] of Object.entries(this.options.config.providers)) {
       if (providerConfig.type === 'codex-chatgpt-local') {
-        models.add('gpt-5.4-mini');
-        models.add('gpt-5.4');
+        addModel({ id: 'gpt-5.4-mini', providerId, displayName: 'gpt-5.4-mini' });
+        addModel({ id: 'gpt-5.4', providerId, displayName: 'gpt-5.4' });
       }
     }
-    return [...models].sort();
+
+    for (const provider of this.options.registry.list()) {
+      if (!provider.listModels) {
+        continue;
+      }
+      try {
+        for (const model of await provider.listModels()) {
+          addModel(model);
+        }
+      } catch {
+        // Dynamic model discovery should not make the local gateway unavailable.
+      }
+    }
+    return [...models.values()].sort((left, right) => left.id.localeCompare(right.id));
   }
 }
 
