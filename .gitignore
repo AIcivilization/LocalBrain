@@ -13,3 +13,6 @@ LocalBrain.app/
 .idea/
 .vscode/
 *.swp
+
+# Local-only Chinese documentation copies.
+docs/*.zh-CN.md

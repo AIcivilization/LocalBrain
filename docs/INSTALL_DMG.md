@@ -1,25 +1,34 @@
-# LocalBrain DMG 安装说明
+# LocalBrain DMG Install Guide
 
-## 安装
+## Install
 
-1. 打开 DMG。
-2. 把 `LocalBrain` 文件夹复制到本机可写目录，例如 `/Users/wf/LocalBrain` 或 `~/Applications/LocalBrain`。
-3. 进入复制后的 `LocalBrain` 文件夹，双击 `LocalBrain.command`。
+1. Open the DMG.
+2. Drag `LocalBrain.app` into `Applications`.
+3. Start `LocalBrain.app`.
 
-不要直接在 DMG 里运行。DMG 是只读包，LocalBrain 启动时需要写入 `logs/` 下的本地配置、Key 和运行日志。
+After launch, LocalBrain appears as a menu-bar icon in the upper-right macOS status bar.
 
-## 使用
+On first launch, the app copies its runtime files to:
 
-启动后，右上角状态栏会出现 LocalBrain 图标。
+```text
+~/Library/Application Support/LocalBrain/runtime
+```
 
-- `配置 Codex`：检查或引导配置本机 Codex ChatGPT 登录态
-- `Key`：复制 `OPENAI_BASE_URL`、复制/生成/替换本地 API Key
-- `其他`：打开控制台、配置文件、审计日志，或重启/停止服务
+Runtime config, generated local API keys, and logs are written under that runtime directory. They are not bundled into the app or committed to GitHub.
 
-本地应用接入：
+## Menu
+
+- `配置 Codex`: checks or guides local Codex ChatGPT login setup
+- `模型`: selects the default model, currently `gpt-5.4-mini` or `gpt-5.4`
+- `Key`: copies `OPENAI_BASE_URL`, copies local API keys, generates new keys, or rotates keys
+- `其他`: opens the console, config file, audit log, refreshes status, restarts/stops LocalBrain, or quits
+
+## Local App Settings
+
+Use these values in local OpenAI-compatible apps:
 
 ```text
 OPENAI_BASE_URL=http://127.0.0.1:8787/v1
-OPENAI_API_KEY=<状态栏菜单 Key 中复制的本地 key>
+OPENAI_API_KEY=<copy from LocalBrain menu: Key>
 ```
 
