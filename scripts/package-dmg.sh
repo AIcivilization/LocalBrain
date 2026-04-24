@@ -10,10 +10,10 @@ STAGING="$(/usr/bin/mktemp -d /tmp/localbrain-dmg.XXXXXX)"
 /usr/bin/ditto "$ROOT/LocalBrain.app" "$STAGING/LocalBrain.app"
 /bin/ln -s /Applications "$STAGING/Applications"
 
-/bin/cat > "$STAGING/先读我.txt" <<'TEXT'
-把 LocalBrain.app 拖到 Applications 文件夹。
-启动后，右上角状态栏会出现 LocalBrain 图标。
-首次启动会把运行文件复制到：
+/bin/cat > "$STAGING/README.txt" <<'TEXT'
+Drag LocalBrain.app into Applications.
+After launch, a LocalBrain icon appears in the upper-right macOS menu bar.
+On first launch, runtime files are copied to:
 ~/Library/Application Support/LocalBrain/runtime
 TEXT
 

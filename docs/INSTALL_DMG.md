@@ -18,10 +18,11 @@ Runtime config, generated local API keys, and logs are written under that runtim
 
 ## Menu
 
-- `配置 Codex`: checks or guides local Codex ChatGPT login setup
-- `模型`: selects the default model, currently `gpt-5.4-mini` or `gpt-5.4`
+- `Configure Codex`: checks or guides local Codex ChatGPT login setup
+- `Model`: selects the default model, currently `gpt-5.4-mini` or `gpt-5.4`
 - `Key`: copies `OPENAI_BASE_URL`, copies local API keys, generates new keys, or rotates keys
-- `其他`: opens the console, config file, audit log, refreshes status, restarts/stops LocalBrain, or quits
+- `Settings`: switches language, opens the console, config file, audit log, refreshes status, or restarts/stops LocalBrain
+- `Quit`: exits LocalBrain from the bottom of the main menu
 
 ## Local App Settings
 
@@ -31,4 +32,3 @@ Use these values in local OpenAI-compatible apps:
 OPENAI_BASE_URL=http://127.0.0.1:8787/v1
 OPENAI_API_KEY=<copy from LocalBrain menu: Key>
 ```
-

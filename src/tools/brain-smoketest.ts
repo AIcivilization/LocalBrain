@@ -33,7 +33,7 @@ async function main(): Promise<void> {
 
   const { runtime: brain, registry } = createBrainRuntimeFromConfig(config);
   const response = await brain.run({
-    input: '请用大脑模块响应，并 use-tool:echo',
+    input: 'Respond through the Brain module and use-tool:echo',
     taskKind: 'tool-use',
     systemPrompt: 'You are a local smoke test brain.',
     appContext: {

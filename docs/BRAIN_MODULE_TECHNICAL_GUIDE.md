@@ -251,7 +251,7 @@ The DMG contains:
 ```text
 LocalBrain.app
 Applications
-先读我.txt
+README.txt
 ```
 
 On first launch, `LocalBrain.app` copies the runtime into:
@@ -262,10 +262,11 @@ On first launch, `LocalBrain.app` copies the runtime into:
 
 The menu contains:
 
-- `配置 Codex`: checks local Codex ChatGPT login status
-- `模型`: selects the default model, currently `gpt-5.4-mini` or `gpt-5.4`
+- `Configure Codex`: checks local Codex ChatGPT login status
+- `Model`: selects the default model, currently `gpt-5.4-mini` or `gpt-5.4`
 - `Key`: shows/copies local API keys and `OPENAI_BASE_URL`
-- `其他`: opens console/config/audit log, refreshes status, restarts/stops service, or quits
+- `Settings`: switches language, opens console/config/audit log, refreshes status, or restarts/stops service
+- `Quit`: exits LocalBrain from the bottom of the main menu
 
 ## Configuration Notes
 

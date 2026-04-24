@@ -2,6 +2,11 @@ import AppKit
 import Foundation
 
 final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
+    private enum AppLanguage: String {
+        case english = "en"
+        case chinese = "zh-Hans"
+    }
+
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private var menu = NSMenu()
     private var serverProcess: Process?
@@ -10,6 +15,15 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
     private var lastState: [String: Any] = [:]
     private var timer: Timer?
     private lazy var projectRoot: URL = prepareProjectRoot()
+    private var language: AppLanguage {
+        get {
+            let raw = UserDefaults.standard.string(forKey: "LocalBrain.language") ?? AppLanguage.english.rawValue
+            return AppLanguage(rawValue: raw) ?? .english
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: "LocalBrain.language")
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         debugLog("applicationDidFinishLaunching projectRoot=\(projectRoot.path)")
@@ -38,7 +52,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
 
         guard let npmPath = findNpm() else {
             debugLog("npm not found")
-            showAlert(title: "LocalBrain 启动失败", message: "找不到 npm。请确认 Node/npm 已安装。")
+            showAlert(title: "LocalBrain failed to start", message: "npm was not found. Please make sure Node.js and npm are installed.")
             return
         }
         debugLog("npmPath=\(npmPath)")
@@ -63,7 +77,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
             debugLog("process started pid=\(process.processIdentifier)")
         } catch {
             debugLog("process failed \(error.localizedDescription)")
-            showAlert(title: "LocalBrain 启动失败", message: error.localizedDescription)
+            showAlert(title: "LocalBrain failed to start", message: error.localizedDescription)
         }
     }
 
@@ -78,7 +92,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
     private func updateStatusTitle() {
         let serviceOK = (lastState["ok"] as? Bool) == true
         let codexOK = ((lastState["codex"] as? [String: Any])?["ok"] as? Bool) == true
-        statusItem.button?.toolTip = serviceOK && codexOK ? "LocalBrain：运行中" : "LocalBrain：需要处理"
+        statusItem.button?.toolTip = serviceOK && codexOK ? text("LocalBrain: running", "LocalBrain\u{FF1A}\u{8FD0}\u{884C}\u{4E2D}") : text("LocalBrain: attention needed", "LocalBrain\u{FF1A}\u{9700}\u{8981}\u{5904}\u{7406}")
         if statusItem.button?.image == nil {
             statusItem.button?.title = serviceOK && codexOK ? "LB" : "LB!"
         }
@@ -103,15 +117,15 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         let codex = lastState["codex"] as? [String: Any] ?? [:]
         let codexOK = (codex["ok"] as? Bool) == true
 
-        menu.addItem(coloredItem(title: serviceOK ? "● LocalBrain：运行中" : "● LocalBrain：未运行", ok: serviceOK))
-        menu.addItem(coloredItem(title: codexOK ? "● Codex：可用" : "● Codex：需要配置", ok: codexOK))
+        menu.addItem(coloredItem(title: serviceOK ? text("● LocalBrain: running", "\u{25CF} LocalBrain\u{FF1A}\u{8FD0}\u{884C}\u{4E2D}") : text("● LocalBrain: not running", "\u{25CF} LocalBrain\u{FF1A}\u{672A}\u{8FD0}\u{884C}"), ok: serviceOK))
+        menu.addItem(coloredItem(title: codexOK ? text("● Codex: ready", "\u{25CF} Codex\u{FF1A}\u{53EF}\u{7528}") : text("● Codex: setup needed", "\u{25CF} Codex\u{FF1A}\u{9700}\u{8981}\u{914D}\u{7F6E}"), ok: codexOK))
         menu.addItem(NSMenuItem.separator())
 
-        let configure = NSMenuItem(title: "配置 Codex", action: #selector(configureCodex), keyEquivalent: "")
+        let configure = NSMenuItem(title: text("Configure Codex", "\u{914D}\u{7F6E} Codex"), action: #selector(configureCodex), keyEquivalent: "")
         configure.target = self
         menu.addItem(configure)
 
-        let modelRoot = NSMenuItem(title: "模型", action: nil, keyEquivalent: "")
+        let modelRoot = NSMenuItem(title: text("Model", "\u{6A21}\u{578B}"), action: nil, keyEquivalent: "")
         modelRoot.submenu = modelMenu()
         menu.addItem(modelRoot)
 
@@ -119,9 +133,12 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         keyRoot.submenu = keyMenu()
         menu.addItem(keyRoot)
 
-        let otherRoot = NSMenuItem(title: "其他", action: nil, keyEquivalent: "")
-        otherRoot.submenu = otherMenu()
-        menu.addItem(otherRoot)
+        let settingsRoot = NSMenuItem(title: text("Settings", "\u{8BBE}\u{7F6E}"), action: nil, keyEquivalent: "")
+        settingsRoot.submenu = settingsMenu()
+        menu.addItem(settingsRoot)
+
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(actionItem(text("Quit", "\u{9000}\u{51FA}"), #selector(quit)))
     }
 
     private func modelMenu() -> NSMenu {
@@ -130,7 +147,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         let models = lastState["availableModels"] as? [String] ?? [selected]
 
         if models.isEmpty {
-            modelMenu.addItem(disabledItem("没有可选模型"))
+            modelMenu.addItem(disabledItem(text("No available models", "\u{6CA1}\u{6709}\u{53EF}\u{9009}\u{6A21}\u{578B}")))
             return modelMenu
         }
 
@@ -142,7 +159,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
             modelMenu.addItem(item)
         }
         modelMenu.addItem(NSMenuItem.separator())
-        modelMenu.addItem(disabledItem("当前：\(selected)"))
+        modelMenu.addItem(disabledItem(text("Current: \(selected)", "\u{5F53}\u{524D}\u{FF1A}\(selected)")))
         return modelMenu
     }
 
@@ -152,14 +169,14 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         let baseURL = lastState["openAIBaseUrl"] as? String ?? "http://127.0.0.1:8787/v1"
 
         keyMenu.addItem(disabledItem("OPENAI_BASE_URL"))
-        keyMenu.addItem(actionItem("复制 \(baseURL)", #selector(copyBaseURL)))
+        keyMenu.addItem(actionItem(text("Copy \(baseURL)", "\u{590D}\u{5236} \(baseURL)"), #selector(copyBaseURL)))
         keyMenu.addItem(NSMenuItem.separator())
 
         if keys.isEmpty {
-            keyMenu.addItem(disabledItem("没有本地 Key"))
+            keyMenu.addItem(disabledItem(text("No local keys", "\u{6CA1}\u{6709}\u{672C}\u{5730} Key")))
         } else {
             for (index, key) in keys.enumerated() {
-                let item = NSMenuItem(title: showKeys ? "复制 \(key)" : "复制 \(mask(key))", action: #selector(copyKey(_:)), keyEquivalent: "")
+                let item = NSMenuItem(title: showKeys ? text("Copy \(key)", "\u{590D}\u{5236} \(key)") : text("Copy \(mask(key))", "\u{590D}\u{5236} \(mask(key))"), action: #selector(copyKey(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = index
                 keyMenu.addItem(item)
@@ -167,37 +184,55 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         }
 
         keyMenu.addItem(NSMenuItem.separator())
-        keyMenu.addItem(actionItem(showKeys ? "隐藏 Key" : "显示 Key", #selector(toggleKeys)))
-        keyMenu.addItem(actionItem("生成新 Key", #selector(generateKey)))
-        keyMenu.addItem(actionItem("替换为新 Key", #selector(replaceKey)))
+        keyMenu.addItem(actionItem(showKeys ? text("Hide Keys", "\u{9690}\u{85CF} Key") : text("Show Keys", "\u{663E}\u{793A} Key"), #selector(toggleKeys)))
+        keyMenu.addItem(actionItem(text("Generate New Key", "\u{751F}\u{6210}\u{65B0} Key"), #selector(generateKey)))
+        keyMenu.addItem(actionItem(text("Replace With New Key", "\u{66FF}\u{6362}\u{4E3A}\u{65B0} Key"), #selector(replaceKey)))
         return keyMenu
     }
 
-    private func otherMenu() -> NSMenu {
-        let other = NSMenu()
-        other.addItem(actionItem("打开控制台", #selector(openConsole)))
-        other.addItem(actionItem("打开配置文件", #selector(openConfig)))
-        other.addItem(actionItem("打开审计日志", #selector(openAuditLog)))
-        other.addItem(NSMenuItem.separator())
-        other.addItem(actionItem("刷新状态", #selector(refreshStatusAction)))
-        other.addItem(actionItem("重启 LocalBrain", #selector(restartServer)))
-        other.addItem(actionItem("停止本次启动的服务", #selector(stopOwnedServer)))
-        other.addItem(NSMenuItem.separator())
-        other.addItem(actionItem("退出", #selector(quit)))
-        return other
+    private func settingsMenu() -> NSMenu {
+        let settings = NSMenu()
+        let languageRoot = NSMenuItem(title: text("Language", "\u{8BED}\u{8A00}"), action: nil, keyEquivalent: "")
+        languageRoot.submenu = languageMenu()
+        settings.addItem(languageRoot)
+        settings.addItem(NSMenuItem.separator())
+        settings.addItem(actionItem(text("Open Console", "\u{6253}\u{5F00}\u{63A7}\u{5236}\u{53F0}"), #selector(openConsole)))
+        settings.addItem(actionItem(text("Open Config File", "\u{6253}\u{5F00}\u{914D}\u{7F6E}\u{6587}\u{4EF6}"), #selector(openConfig)))
+        settings.addItem(actionItem(text("Open Audit Log", "\u{6253}\u{5F00}\u{5BA1}\u{8BA1}\u{65E5}\u{5FD7}"), #selector(openAuditLog)))
+        settings.addItem(NSMenuItem.separator())
+        settings.addItem(actionItem(text("Refresh Status", "\u{5237}\u{65B0}\u{72B6}\u{6001}"), #selector(refreshStatusAction)))
+        settings.addItem(actionItem(text("Restart LocalBrain", "\u{91CD}\u{542F} LocalBrain"), #selector(restartServer)))
+        settings.addItem(actionItem(text("Stop This Service", "\u{505C}\u{6B62}\u{672C}\u{6B21}\u{542F}\u{52A8}\u{7684}\u{670D}\u{52A1}"), #selector(stopOwnedServer)))
+        return settings
+    }
+
+    private func languageMenu() -> NSMenu {
+        let languageMenu = NSMenu()
+        let english = NSMenuItem(title: "English", action: #selector(selectLanguage(_:)), keyEquivalent: "")
+        english.target = self
+        english.representedObject = AppLanguage.english.rawValue
+        english.state = language == .english ? .on : .off
+        languageMenu.addItem(english)
+
+        let chinese = NSMenuItem(title: "\u{4E2D}\u{6587}", action: #selector(selectLanguage(_:)), keyEquivalent: "")
+        chinese.target = self
+        chinese.representedObject = AppLanguage.chinese.rawValue
+        chinese.state = language == .chinese ? .on : .off
+        languageMenu.addItem(chinese)
+        return languageMenu
     }
 
     @objc private func configureCodex() {
         let status = codexStatus()
         if (status["ok"] as? Bool) == true {
-            showAlert(title: "Codex 已可用", message: "本机 Codex ChatGPT 登录态正常。")
+            showAlert(title: text("Codex is ready", "Codex \u{5DF2}\u{53EF}\u{7528}"), message: text("Local Codex ChatGPT login is available.", "\u{672C}\u{673A} Codex ChatGPT \u{767B}\u{5F55}\u{6001}\u{6B63}\u{5E38}\u{3002}"))
             refreshState()
             return
         }
 
         let command = "cd \(shellQuote(projectRoot.path)); codex"
         runAppleScript("tell application \"Terminal\" to do script \(appleScriptString(command))")
-        showAlert(title: "请完成 Codex 登录", message: "已打开终端。请在 Codex 中选择 Sign in with ChatGPT，完成后回到 LocalBrain 刷新状态。")
+        showAlert(title: text("Complete Codex login", "\u{8BF7}\u{5B8C}\u{6210} Codex \u{767B}\u{5F55}"), message: text("Terminal has been opened. In Codex, choose Sign in with ChatGPT, then return to LocalBrain and refresh status.", "\u{5DF2}\u{6253}\u{5F00}\u{7EC8}\u{7AEF}\u{3002}\u{8BF7}\u{5728} Codex \u{4E2D}\u{9009}\u{62E9} Sign in with ChatGPT\u{FF0C}\u{5B8C}\u{6210}\u{540E}\u{56DE}\u{5230} LocalBrain \u{5237}\u{65B0}\u{72B6}\u{6001}\u{3002}"))
     }
 
     @objc private func openConsole() {
@@ -233,6 +268,14 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
 
     @objc private func toggleKeys() {
         showKeys.toggle()
+        rebuildMenu()
+    }
+
+    @objc private func selectLanguage(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let nextLanguage = AppLanguage(rawValue: raw) else { return }
+        language = nextLanguage
+        updateStatusTitle()
         rebuildMenu()
     }
 
@@ -387,6 +430,10 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
     private func runAppleScript(_ source: String) {
         var error: NSDictionary?
         NSAppleScript(source: source)?.executeAndReturnError(&error)
+    }
+
+    private func text(_ english: String, _ chinese: String) -> String {
+        language == .chinese ? chinese : english
     }
 
     private func prepareProjectRoot() -> URL {

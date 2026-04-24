@@ -466,41 +466,41 @@ function renderConsoleHtml(): string {
     <header>
       <div>
         <h1>LocalBrain</h1>
-        <p>本地 OpenAI-compatible 大脑网关</p>
+        <p>Local OpenAI-compatible brain gateway</p>
       </div>
       <div class="status"><span class="dot"></span><span id="status">Loading</span></div>
     </header>
     <div class="grid">
       <section>
-        <h2>连接配置</h2>
+        <h2>Connection</h2>
         <label class="notice">OPENAI_BASE_URL</label>
         <div class="row">
           <input id="baseUrl" readonly>
-          <button data-copy="baseUrl">复制</button>
+          <button data-copy="baseUrl">Copy</button>
         </div>
-        <label class="notice">默认模型</label>
+        <label class="notice">Default model</label>
         <div class="row">
           <input id="model" readonly>
-          <button data-copy="model">复制</button>
+          <button data-copy="model">Copy</button>
         </div>
       </section>
       <section>
-        <h2>服务信息</h2>
+        <h2>Service</h2>
         <div class="meta">
-          <div>配置文件：<span id="configPath"></span></div>
-          <div>审计日志：<span id="auditLogPath"></span></div>
+          <div>Config file: <span id="configPath"></span></div>
+          <div>Audit log: <span id="auditLogPath"></span></div>
           <div>Provider：<span id="providers"></span></div>
         </div>
       </section>
       <section class="wide">
-        <h2>本地 API Key</h2>
+        <h2>Local API Keys</h2>
         <ul id="keys"></ul>
         <div class="row">
-          <button class="primary" id="newKey">生成新 Key</button>
-          <button class="danger" id="replaceKey">替换为新 Key</button>
-          <button class="secondary" id="toggleKeys">显示/隐藏</button>
+          <button class="primary" id="newKey">Generate New Key</button>
+          <button class="danger" id="replaceKey">Replace With New Key</button>
+          <button class="secondary" id="toggleKeys">Show/Hide</button>
         </div>
-        <p class="notice">这是本地代理 Key，不是 Codex 或 OpenAI token。只用于访问 127.0.0.1 上的 LocalBrain。</p>
+        <p class="notice">These are local proxy keys, not Codex or OpenAI tokens. They are only used to access LocalBrain on 127.0.0.1.</p>
       </section>
     </div>
   </main>
@@ -514,8 +514,8 @@ function renderConsoleHtml(): string {
       $('status').textContent = state.ok ? 'Running' : 'Unavailable';
       $('baseUrl').value = state.openAIBaseUrl || '';
       $('model').value = state.defaultModel || '';
-      $('configPath').textContent = state.configPath || '未提供';
-      $('auditLogPath').textContent = state.auditLogPath || '未启用';
+      $('configPath').textContent = state.configPath || 'not provided';
+      $('auditLogPath').textContent = state.auditLogPath || 'disabled';
       $('providers').textContent = (state.providers || []).map((p) => p.id).join(', ');
       renderKeys();
     }
@@ -525,7 +525,7 @@ function renderConsoleHtml(): string {
     }
     function renderKeys() {
       const keys = state?.apiKeys || [];
-      $('keys').innerHTML = keys.map((key, index) => '<li class="key"><div class="mono">' + (visible ? key : mask(key)) + '</div><button data-key="' + index + '">复制</button></li>').join('');
+      $('keys').innerHTML = keys.map((key, index) => '<li class="key"><div class="mono">' + (visible ? key : mask(key)) + '</div><button data-key="' + index + '">Copy</button></li>').join('');
       document.querySelectorAll('[data-key]').forEach((button) => {
         button.addEventListener('click', () => navigator.clipboard.writeText(keys[Number(button.dataset.key)]));
       });

@@ -22,10 +22,11 @@ Start `LocalBrain.app`. A LocalBrain icon appears in the upper-right menu bar.
 
 The menu contains:
 
-- `配置 Codex`: checks whether local Codex ChatGPT login is available
-- `模型`: selects the default model, currently `gpt-5.4-mini` or `gpt-5.4`
+- `Configure Codex`: checks whether local Codex ChatGPT login is available
+- `Model`: selects the default model, currently `gpt-5.4-mini` or `gpt-5.4`
 - `Key`: copies `OPENAI_BASE_URL`, copies local API keys, generates new keys, and rotates keys
-- `其他`: opens the web console, config file, audit log, refreshes status, restarts/stops LocalBrain, or quits
+- `Settings`: switches language, opens the web console, config file, audit log, refreshes status, or restarts/stops LocalBrain
+- `Quit`: exits LocalBrain from the bottom of the main menu
 
 On first launch, LocalBrain copies its runtime files to:
 
@@ -154,3 +155,37 @@ See:
 
 - [`docs/BRAIN_MODULE_TECHNICAL_GUIDE.md`](docs/BRAIN_MODULE_TECHNICAL_GUIDE.md)
 - [`docs/INSTALL_DMG.md`](docs/INSTALL_DMG.md)
+
+## 简体中文简介
+
+LocalBrain 是一个本地运行的 OpenAI-compatible 大脑网关，用于个人开发、原型验证和本机 AI 应用测试。
+
+它默认运行在：
+
+```text
+http://127.0.0.1:8787
+```
+
+本地应用只需要配置：
+
+```text
+OPENAI_BASE_URL=http://127.0.0.1:8787/v1
+OPENAI_API_KEY=<从 LocalBrain 菜单 Key 中复制>
+```
+
+macOS 使用方式：
+
+1. 从 GitHub Releases 下载 DMG。
+2. 打开 DMG，把 `LocalBrain.app` 拖到 `Applications`。
+3. 启动 `LocalBrain.app`。
+4. 在右上角菜单栏中配置 Codex、选择模型、复制本地 Key。
+
+菜单包含：
+
+- `Configure Codex`：检查本机 Codex ChatGPT 登录态
+- `Model`：选择默认模型，目前支持 `gpt-5.4-mini` 和 `gpt-5.4`
+- `Key`：复制 `OPENAI_BASE_URL`、复制/生成/替换本地 API Key
+- `Settings`：切换中英文、打开控制台、配置文件、审计日志，或重启/停止 LocalBrain
+- `Quit`：退出 LocalBrain，位于主菜单最底部
+
+本项目适合本地个人测试。Codex/ChatGPT 本地订阅模式不建议用于正式产品发布。
