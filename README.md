@@ -50,8 +50,8 @@ OPENAI_API_KEY=<copy from LocalBrain menu: Key>
 Example model IDs:
 
 ```text
-gpt-5.4-mini
-gpt-5.4
+gpt-5.5-mini
+gpt-5.5
 opencode/gpt-5-nano
 opencode/*-free
 ```
@@ -78,7 +78,7 @@ curl -X POST http://127.0.0.1:8787/v1/chat/completions \
   -H "authorization: Bearer $OPENAI_API_KEY" \
   -H "content-type: application/json" \
   -d '{
-    "model": "gpt-5.4-mini",
+    "model": "gpt-5.5-mini",
     "messages": [
       { "role": "user", "content": "Reply with OK only." }
     ]
@@ -92,7 +92,7 @@ curl -X POST http://127.0.0.1:8787/v1/responses \
   -H "authorization: Bearer $OPENAI_API_KEY" \
   -H "content-type: application/json" \
   -d '{
-    "model": "gpt-5.4-mini",
+    "model": "gpt-5.5-mini",
     "input": "Reply with OK only."
   }'
 ```

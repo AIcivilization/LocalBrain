@@ -158,7 +158,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
 
     private func modelMenu() -> NSMenu {
         let modelMenu = NSMenu()
-        let selected = lastState["defaultModel"] as? String ?? "gpt-5.4-mini"
+        let selected = lastState["defaultModel"] as? String ?? "gpt-5.5-mini"
         let models = lastState["availableModels"] as? [String] ?? [selected]
 
         if models.isEmpty {

@@ -86,6 +86,25 @@ async function mergeConfigDefaults(configPath: string, sourcePath: string): Prom
     if (!providers[providerId]) {
       providers[providerId] = providerConfig;
       changed = true;
+      continue;
+    }
+
+    const currentOptions = providers[providerId].options ?? {};
+    const sourceOptions = providerConfig.options ?? {};
+    const nextOptions = { ...currentOptions };
+    let providerChanged = false;
+    for (const [key, value] of Object.entries(sourceOptions)) {
+      if (!(key in nextOptions)) {
+        nextOptions[key] = value;
+        providerChanged = true;
+      }
+    }
+    if (providerChanged) {
+      providers[providerId] = {
+        ...providers[providerId],
+        options: nextOptions,
+      };
+      changed = true;
     }
   }
 

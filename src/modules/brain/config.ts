@@ -171,8 +171,10 @@ function registerConfiguredProvider(
       displayName: providerConfig.displayName,
       authPath: typeof providerConfig.options?.authPath === 'string' ? providerConfig.options.authPath : undefined,
       endpoint: providerConfig.baseUrl,
+      cliPath: typeof providerConfig.options?.cliPath === 'string' ? providerConfig.options.cliPath : undefined,
       clientId: typeof providerConfig.options?.clientId === 'string' ? providerConfig.options.clientId : undefined,
       userAgent: typeof providerConfig.options?.userAgent === 'string' ? providerConfig.options.userAgent : undefined,
+      modelCacheTtlMs: typeof providerConfig.options?.modelCacheTtlMs === 'number' ? providerConfig.options.modelCacheTtlMs : undefined,
     }));
     return;
   }

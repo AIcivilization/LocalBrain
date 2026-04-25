@@ -387,13 +387,6 @@ export class BrainServer {
         });
       }
     }
-    for (const [providerId, providerConfig] of Object.entries(this.options.config.providers)) {
-      if (providerConfig.type === 'codex-chatgpt-local') {
-        addModel({ id: 'gpt-5.4-mini', providerId, displayName: 'gpt-5.4-mini' });
-        addModel({ id: 'gpt-5.4', providerId, displayName: 'gpt-5.4' });
-      }
-    }
-
     for (const provider of this.options.registry.list()) {
       if (!provider.listModels) {
         continue;

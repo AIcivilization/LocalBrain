@@ -1,7 +1,7 @@
 {
   "defaultProvider": "codex-chatgpt-local",
-  "defaultModel": "gpt-5.4-mini",
-  "models": ["gpt-5.4-mini", "gpt-5.4"],
+  "defaultModel": "gpt-5.5-mini",
+  "models": ["gpt-5.5-mini", "gpt-5.5"],
   "providers": {
     "codex-chatgpt-local": {
       "type": "codex-chatgpt-local",
@@ -11,8 +11,10 @@
       "experimental": true,
       "options": {
         "authPath": "/Users/wf/.codex/auth.json",
+        "cliPath": "/opt/homebrew/bin/codex",
         "clientId": "app_EMoamEEZ73f0CkXaXp7hrann",
-        "userAgent": "brain-local-codex-provider/0.1"
+        "userAgent": "brain-local-codex-provider/0.1",
+        "modelCacheTtlMs": 60000
       }
     },
     "opencode-local": {
@@ -38,19 +40,19 @@
   "routing": {
     "chat": {
       "providerId": "codex-chatgpt-local",
-      "model": "gpt-5.4-mini"
+      "model": "gpt-5.5-mini"
     },
     "fast": {
       "providerId": "codex-chatgpt-local",
-      "model": "gpt-5.4-mini"
+      "model": "gpt-5.5-mini"
     },
     "code": {
       "providerId": "codex-chatgpt-local",
-      "model": "gpt-5.4"
+      "model": "gpt-5.5"
     },
     "tool-use": {
       "providerId": "codex-chatgpt-local",
-      "model": "gpt-5.4"
+      "model": "gpt-5.5"
     }
   },
   "tools": {

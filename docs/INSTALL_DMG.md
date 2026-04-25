@@ -19,7 +19,7 @@ Runtime config, generated local API keys, and logs are written under that runtim
 ## Menu
 
 - `Configure Codex`: checks or guides local Codex ChatGPT login setup
-- `Model`: selects the default model, currently `gpt-5.4-mini` or `gpt-5.4`
+- `Model`: selects the default model, currently `gpt-5.5-mini` or `gpt-5.5`
 - `Key`: copies `OPENAI_BASE_URL`, copies local API keys, generates new keys, or rotates keys
 - `Settings`: switches language, opens the console, config file, audit log, refreshes status, or restarts/stops LocalBrain
 - `Quit`: exits LocalBrain from the bottom of the main menu

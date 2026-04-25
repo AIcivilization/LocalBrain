@@ -1,15 +1,20 @@
 import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 
 import type {
   BrainMessage,
+  BrainModelDescriptor,
   BrainProvider,
   BrainProviderDescriptor,
   BrainProviderRequest,
   BrainProviderResponse,
 } from '../types.ts';
+
+const execFileAsync = promisify(execFile);
 
 interface CodexAuthJson {
   auth_mode?: string;
@@ -43,14 +48,28 @@ interface RefreshResponse {
   expires_in?: number;
 }
 
+interface CodexModelCatalog {
+  models?: CodexCatalogModel[];
+}
+
+interface CodexCatalogModel {
+  slug?: string;
+  display_name?: string;
+  visibility?: string;
+  supported_in_api?: boolean;
+  priority?: number;
+}
+
 export interface CodexChatGptLocalProviderOptions {
   id: string;
   authPath?: string;
   endpoint?: string;
+  cliPath?: string;
   clientId?: string;
   displayName?: string;
   refreshSkewSeconds?: number;
   userAgent?: string;
+  modelCacheTtlMs?: number;
 }
 
 const DEFAULT_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
@@ -61,20 +80,28 @@ export class CodexChatGptLocalProvider implements BrainProvider {
   readonly kind = 'codex-chatgpt-local' as const;
   private readonly authPath: string;
   private readonly endpoint: string;
+  private readonly cliPath: string;
   private readonly clientId: string;
   private readonly displayName: string;
   private readonly refreshSkewSeconds: number;
   private readonly userAgent: string;
+  private readonly modelCacheTtlMs: number;
   private refreshInFlight?: Promise<CodexAuthJson>;
+  private modelCache?: {
+    expiresAt: number;
+    models: BrainModelDescriptor[];
+  };
 
   constructor(options: CodexChatGptLocalProviderOptions) {
     this.id = options.id;
     this.authPath = options.authPath ?? path.join(os.homedir(), '.codex', 'auth.json');
     this.endpoint = options.endpoint ?? DEFAULT_ENDPOINT;
+    this.cliPath = options.cliPath ?? 'codex';
     this.clientId = options.clientId ?? DEFAULT_CLIENT_ID;
     this.displayName = options.displayName ?? 'Codex ChatGPT Local Provider';
     this.refreshSkewSeconds = options.refreshSkewSeconds ?? 300;
     this.userAgent = options.userAgent ?? 'brain-local-codex-provider/0.1';
+    this.modelCacheTtlMs = options.modelCacheTtlMs ?? 60_000;
   }
 
   describe(): BrainProviderDescriptor {
@@ -87,6 +114,34 @@ export class CodexChatGptLocalProvider implements BrainProvider {
       localOnly: false,
       experimental: true,
     };
+  }
+
+  async listModels(): Promise<BrainModelDescriptor[]> {
+    const now = Date.now();
+    if (this.modelCache && this.modelCache.expiresAt > now) {
+      return this.modelCache.models;
+    }
+
+    const { stdout } = await execFileAsync(this.cliPath, ['debug', 'models'], {
+      timeout: 10_000,
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    const catalog = JSON.parse(stdout) as CodexModelCatalog;
+    const models = (catalog.models ?? [])
+      .filter((model) => typeof model.slug === 'string' && model.slug.length > 0)
+      .filter((model) => model.visibility !== 'hide')
+      .sort((left, right) => (left.priority ?? 999) - (right.priority ?? 999))
+      .map((model) => ({
+        id: model.slug as string,
+        providerId: this.id,
+        displayName: model.display_name ?? model.slug,
+      }));
+
+    this.modelCache = {
+      expiresAt: now + this.modelCacheTtlMs,
+      models,
+    };
+    return models;
   }
 
   async generate(request: BrainProviderRequest): Promise<BrainProviderResponse> {
