@@ -127,7 +127,7 @@ npm run brain-codex-status
 List discovered OpenCode models:
 
 ```bash
-/Users/wf/.opencode/bin/opencode models opencode
+.opencode/bin/opencode models opencode
 ```
 
 OpenAI-compatible providers discover models from their upstream `/models` endpoint when their API key environment variable is available.
