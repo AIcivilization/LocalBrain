@@ -254,7 +254,7 @@ Security behavior:
 Prerequisite:
 
 ```bash
-/Users/wf/.opencode/bin/opencode auth login
+～/.opencode/bin/opencode auth login
 ```
 
 List the currently available OpenCode models:
