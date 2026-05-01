@@ -11,6 +11,10 @@ export class BrainProviderRegistry {
     this.providers.set(provider.id, provider);
   }
 
+  registerOrReplace(provider: BrainProvider): void {
+    this.providers.set(provider.id, provider);
+  }
+
   get(providerId: string): BrainProvider {
     const provider = this.providers.get(providerId);
     if (!provider) {

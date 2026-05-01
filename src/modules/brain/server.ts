@@ -3,7 +3,8 @@ import { randomBytes } from 'node:crypto';
 import { appendFile, mkdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import type { BrainConfig, BrainModelDescriptor, BrainProductRequest, BrainServerConfig } from './types.ts';
+import { registerConfiguredProvider } from './config.ts';
+import type { BrainConfig, BrainModelDescriptor, BrainProductRequest, BrainProviderConfig, BrainServerConfig } from './types.ts';
 import type { BrainRuntime } from './brain-runtime.ts';
 import type { BrainProviderRegistry } from './provider-registry.ts';
 import {
@@ -20,6 +21,29 @@ export interface BrainServerOptions {
   configPath?: string;
   runtime: BrainRuntime;
   registry: BrainProviderRegistry;
+}
+
+interface UpstreamApiKeyRequest {
+  providerId?: string;
+  displayName?: string;
+  baseUrl?: string;
+  apiKey?: string;
+  model?: string;
+  makeDefault?: boolean;
+}
+
+interface LocalApiKeyRouteRequest {
+  apiKey?: string;
+  providerId?: string;
+  model?: string;
+  clear?: boolean;
+}
+
+interface ProviderModelFilterRequest {
+  providerId?: string;
+  enabled?: boolean;
+  freeOnly?: boolean;
+  only?: boolean;
 }
 
 export class BrainServer {
@@ -77,7 +101,8 @@ export class BrainServer {
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const startedAt = Date.now();
     const method = request.method ?? 'GET';
-    const path = new URL(request.url ?? '/', this.url()).pathname;
+    const requestUrl = new URL(request.url ?? '/', this.url());
+    const path = requestUrl.pathname;
 
     if (method === 'OPTIONS') {
       this.writeCorsPreflight(response);
@@ -133,14 +158,52 @@ export class BrainServer {
       return;
     }
 
-    if (!this.isAuthorized(request)) {
+    if (method === 'POST' && path === '/brain/admin/key-model') {
+      const body = await this.readJson<LocalApiKeyRouteRequest>(request);
+      await this.setLocalApiKeyRoute(body);
+      this.writeJson(response, 200, {
+        ok: true,
+        state: await this.localState(),
+      });
+      await this.audit(method, path, 200, startedAt);
+      return;
+    }
+
+    if (method === 'POST' && path === '/brain/admin/provider-model-filter') {
+      const body = await this.readJson<ProviderModelFilterRequest>(request);
+      await this.setProviderModelFilter(body);
+      this.writeJson(response, 200, {
+        ok: true,
+        state: await this.localState(),
+      });
+      await this.audit(method, path, 200, startedAt);
+      return;
+    }
+
+    if (method === 'POST' && path === '/brain/admin/upstream-api-keys') {
+      const body = await this.readJson<UpstreamApiKeyRequest>(request);
+      const result = await this.addUpstreamApiKeyProvider(body);
+      this.writeJson(response, 200, {
+        ok: true,
+        ...result,
+        state: await this.localState(),
+      });
+      await this.audit(method, path, 200, startedAt);
+      return;
+    }
+
+    const localApiKey = this.authorizedApiKey(request);
+    if (localApiKey === undefined) {
       this.writeError(response, 401, 'unauthorized', 'missing or invalid local brain API key');
       await this.audit(method, path, 401, startedAt);
       return;
     }
 
     if (method === 'GET' && path === '/v1/models') {
-      const models = await this.availableModelDescriptors();
+      const models = this.filterModelsForLocalApiKey(
+        await this.availableModelDescriptors(requestUrl.searchParams.get('free') === 'true'),
+        localApiKey,
+      );
       this.writeJson(response, 200, modelsResponse(this.options.registry, this.options.config.defaultModel, models.map((model) => model.id)));
       await this.audit(method, path, 200, startedAt);
       return;
@@ -148,7 +211,7 @@ export class BrainServer {
 
     if (method === 'POST' && path === '/brain/run') {
       const body = await this.readJson<BrainProductRequest>(request);
-      const result = await this.options.runtime.run(body);
+      const result = await this.options.runtime.run(await this.constrainToAllowedModels(this.applyLocalApiKeyRoute(body, localApiKey)));
       this.writeJson(response, 200, result);
       await this.audit(method, path, 200, startedAt, result.providerId, result.model);
       return;
@@ -156,7 +219,7 @@ export class BrainServer {
 
     if (method === 'POST' && path === '/v1/chat/completions') {
       const body = await this.readJson<Record<string, unknown>>(request);
-      const result = await this.options.runtime.run(openAIChatToBrainRequest(body));
+      const result = await this.options.runtime.run(await this.constrainToAllowedModels(this.applyLocalApiKeyRoute(openAIChatToBrainRequest(body), localApiKey)));
       if (body.stream === true) {
         this.writeSse(response, brainToOpenAIChatStreamChunks(result));
         await this.audit(method, path, 200, startedAt, result.providerId, result.model);
@@ -169,7 +232,7 @@ export class BrainServer {
 
     if (method === 'POST' && path === '/v1/responses') {
       const body = await this.readJson<Record<string, unknown>>(request);
-      const result = await this.options.runtime.run(openAIResponsesToBrainRequest(body));
+      const result = await this.options.runtime.run(await this.constrainToAllowedModels(this.applyLocalApiKeyRoute(openAIResponsesToBrainRequest(body), localApiKey)));
       this.writeJson(response, 200, brainToOpenAIResponse(result));
       await this.audit(method, path, 200, startedAt, result.providerId, result.model);
       return;
@@ -180,18 +243,22 @@ export class BrainServer {
   }
 
   private isAuthorized(request: IncomingMessage): boolean {
+    return this.authorizedApiKey(request) !== undefined;
+  }
+
+  private authorizedApiKey(request: IncomingMessage): string | undefined {
     if (!this.serverConfig.requireAuth) {
-      return true;
+      return '';
     }
 
     const header = request.headers.authorization ?? '';
     const token = Array.isArray(header) ? header[0] : header;
     const match = token.match(/^Bearer\s+(.+)$/i);
     if (!match) {
-      return false;
+      return undefined;
     }
 
-    return this.serverConfig.apiKeys.includes(match[1]);
+    return this.serverConfig.apiKeys.includes(match[1]) ? match[1] : undefined;
   }
 
   private async readJson<T>(request: IncomingMessage): Promise<T> {
@@ -283,6 +350,23 @@ export class BrainServer {
 
   private async localState(): Promise<Record<string, unknown>> {
     const models = await this.availableModelDescriptors();
+    const apiKeyRoutes = this.serverConfig.apiKeyRoutes ?? {};
+    const modelProviderFilters = this.serverConfig.modelProviderFilters ?? {};
+    const apiKeyDetails = this.serverConfig.apiKeys.map((key) => ({
+      key,
+      route: apiKeyRoutes[key],
+    }));
+    const upstreamProviders = Object.entries(this.options.config.providers)
+      .filter(([_providerId, provider]) => provider.type === 'openai-api-key' || provider.type === 'vercel-ai-sdk')
+      .map(([providerId, provider]) => ({
+        id: providerId,
+        type: provider.type,
+        displayName: provider.displayName ?? providerId,
+        baseUrl: provider.baseUrl ?? 'https://api.openai.com/v1',
+        disabled: provider.disabled === true,
+        hasStoredApiKey: Boolean(provider.apiKey),
+        apiKeyEnv: provider.apiKeyEnv,
+      }));
     return {
       ok: true,
       service: 'LocalBrain',
@@ -291,10 +375,15 @@ export class BrainServer {
       configPath: this.options.configPath,
       defaultModel: this.options.config.defaultModel,
       availableModels: models.map((model) => model.id),
+      availableFreeModels: models.filter((model) => model.free === true).map((model) => model.id),
       availableModelDetails: models,
       providers: this.options.registry.list().map((provider) => provider.describe()),
+      modelProviderFilters,
+      upstreamProviders,
       requireAuth: this.serverConfig.requireAuth,
       apiKeys: this.serverConfig.apiKeys,
+      apiKeyDetails,
+      apiKeyRoutes,
       auditLogPath: this.serverConfig.auditLogPath,
     };
   }
@@ -306,14 +395,158 @@ export class BrainServer {
 
     const key = `brain-local-${randomBytes(24).toString('base64url')}`;
     const nextKeys = replace ? [key] : [...this.serverConfig.apiKeys, key];
+    const nextApiKeyRoutes = replace ? {} : { ...this.serverConfig.apiKeyRoutes };
+    const modelProviderFilters = { ...this.serverConfig.modelProviderFilters };
     this.serverConfig.apiKeys = nextKeys;
+    this.serverConfig.apiKeyRoutes = nextApiKeyRoutes;
     this.options.config.server = {
       ...this.serverConfig,
       apiKeys: nextKeys,
+      apiKeyRoutes: nextApiKeyRoutes,
+      modelProviderFilters,
     };
 
     await atomicWriteJson(this.options.configPath, this.options.config);
     return key;
+  }
+
+  private async setLocalApiKeyRoute(body: LocalApiKeyRouteRequest): Promise<void> {
+    if (!this.options.configPath) {
+      throw new Error('cannot persist key model assignment because server was started without configPath');
+    }
+
+    const apiKey = body.apiKey?.trim();
+    if (!apiKey || !this.serverConfig.apiKeys.includes(apiKey)) {
+      throw new Error('apiKey must be an existing local API key');
+    }
+
+    const nextRoutes = { ...(this.serverConfig.apiKeyRoutes ?? {}) };
+    if (body.clear === true) {
+      delete nextRoutes[apiKey];
+      this.serverConfig.apiKeyRoutes = nextRoutes;
+      this.options.config.server = {
+        ...this.serverConfig,
+        apiKeyRoutes: nextRoutes,
+      };
+      await atomicWriteJson(this.options.configPath, this.options.config);
+      return;
+    }
+
+    const model = body.model?.trim();
+    if (!model) {
+      throw new Error('model is required');
+    }
+
+    const availableModels = await this.availableModelDescriptors();
+    const selectedModel = availableModels.find((candidate) => candidate.id === model);
+    if (!selectedModel) {
+      throw new Error(`unsupported model: ${model}`);
+    }
+
+    nextRoutes[apiKey] = {
+      providerId: body.providerId?.trim() || selectedModel.providerId,
+      model,
+    };
+    this.serverConfig.apiKeyRoutes = nextRoutes;
+    this.options.config.server = {
+      ...this.serverConfig,
+      apiKeyRoutes: nextRoutes,
+    };
+
+    await atomicWriteJson(this.options.configPath, this.options.config);
+  }
+
+  private async setProviderModelFilter(body: ProviderModelFilterRequest): Promise<void> {
+    if (!this.options.configPath) {
+      throw new Error('cannot persist provider model filter because server was started without configPath');
+    }
+
+    const providerId = body.providerId?.trim();
+    if (!providerId || !this.options.config.providers[providerId]) {
+      throw new Error('providerId must be an existing provider');
+    }
+
+    const currentFilters = { ...(this.serverConfig.modelProviderFilters ?? {}) };
+    const nextFilters = body.only === true
+      ? Object.fromEntries(Object.keys(this.options.config.providers).map((id) => [
+        id,
+        {
+          ...currentFilters[id],
+          enabled: id === providerId,
+        },
+      ]))
+      : currentFilters;
+
+    nextFilters[providerId] = {
+      ...nextFilters[providerId],
+      enabled: body.enabled ?? nextFilters[providerId]?.enabled ?? true,
+      freeOnly: body.freeOnly ?? nextFilters[providerId]?.freeOnly ?? false,
+    };
+
+    this.serverConfig.modelProviderFilters = nextFilters;
+    this.options.config.server = {
+      ...this.serverConfig,
+      modelProviderFilters: nextFilters,
+    };
+
+    await atomicWriteJson(this.options.configPath, this.options.config);
+  }
+
+  private async addUpstreamApiKeyProvider(body: UpstreamApiKeyRequest): Promise<Record<string, unknown>> {
+    if (!this.options.configPath) {
+      throw new Error('cannot persist upstream API key because server was started without configPath');
+    }
+
+    const apiKey = body.apiKey?.trim();
+    if (!apiKey) {
+      throw new Error('apiKey is required');
+    }
+
+    const baseUrl = normalizeBaseUrl(body.baseUrl);
+    const providerId = resolveProviderId(this.options.config, body.providerId, body.displayName, baseUrl);
+    const displayName = body.displayName?.trim() || `API Key: ${new URL(baseUrl).host}`;
+    const providerConfig: BrainProviderConfig = {
+      ...this.options.config.providers[providerId],
+      type: 'openai-api-key',
+      displayName,
+      baseUrl,
+      apiKey,
+      localOnly: false,
+      disabled: false,
+    };
+
+    this.options.config.providers = {
+      ...this.options.config.providers,
+      [providerId]: providerConfig,
+    };
+
+    const model = body.model?.trim();
+    if (model) {
+      this.options.config.models = addUnique(this.options.config.models ?? [], model);
+    }
+
+    registerConfiguredProvider(this.options.registry, providerId, providerConfig);
+    await atomicWriteJson(this.options.configPath, this.options.config);
+
+    let selectedDefaultModel: string | undefined;
+    let warning: string | undefined;
+    if (body.makeDefault === true) {
+      try {
+        const defaultModel = model ?? (await this.options.registry.get(providerId).listModels?.())?.[0]?.id;
+        if (defaultModel) {
+          await this.setDefaultModel(defaultModel);
+          selectedDefaultModel = defaultModel;
+        }
+      } catch (error) {
+        warning = error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    return {
+      providerId,
+      selectedDefaultModel,
+      warning,
+    };
   }
 
   private async setDefaultModel(model?: string): Promise<void> {
@@ -351,7 +584,40 @@ export class BrainServer {
     await atomicWriteJson(this.options.configPath, this.options.config);
   }
 
-  private async availableModelDescriptors(): Promise<BrainModelDescriptor[]> {
+  private applyLocalApiKeyRoute(request: BrainProductRequest, localApiKey: string): BrainProductRequest {
+    const route = this.serverConfig.apiKeyRoutes?.[localApiKey];
+    if (!route) {
+      return request;
+    }
+
+    return {
+      ...request,
+      providerId: route.providerId,
+      model: route.model,
+      metadata: {
+        ...request.metadata,
+        localBrainKeyModelRoute: true,
+      },
+    };
+  }
+
+  private filterModelsForLocalApiKey(models: BrainModelDescriptor[], localApiKey: string): BrainModelDescriptor[] {
+    const route = this.serverConfig.apiKeyRoutes?.[localApiKey];
+    if (!route) {
+      return models;
+    }
+
+    const selected = models.find((model) => model.id === route.model);
+    return selected
+      ? [selected]
+      : [{
+        id: route.model,
+        providerId: route.providerId,
+        displayName: route.model,
+      }];
+  }
+
+  private async availableModelDescriptors(freeOnly = false): Promise<BrainModelDescriptor[]> {
     const models = new Map<string, BrainModelDescriptor>();
     const addModel = (model: BrainModelDescriptor): void => {
       const current = models.get(model.id);
@@ -399,7 +665,49 @@ export class BrainServer {
         // Dynamic model discovery should not make the local gateway unavailable.
       }
     }
-    return [...models.values()].sort((left, right) => left.id.localeCompare(right.id));
+    return [...models.values()]
+      .filter((model) => this.isModelAllowedByProviderFilter(model))
+      .filter((model) => !freeOnly || model.free === true)
+      .sort((left, right) => left.id.localeCompare(right.id));
+  }
+
+  private async constrainToAllowedModels(request: BrainProductRequest): Promise<BrainProductRequest> {
+    const models = await this.availableModelDescriptors();
+    if (models.length === 0) {
+      throw new Error('no models are allowed by the current provider filters');
+    }
+
+    const requestedModel = request.model;
+    const requestedProviderId = request.providerId;
+    const requestedAllowed = requestedModel
+      ? models.find((model) => model.id === requestedModel && (!requestedProviderId || model.providerId === requestedProviderId))
+      : undefined;
+    if (requestedAllowed) {
+      return request;
+    }
+
+    const fallback = models[0];
+    return {
+      ...request,
+      providerId: fallback.providerId,
+      model: fallback.id,
+      metadata: {
+        ...request.metadata,
+        localBrainProviderFilterForcedModel: true,
+      },
+    };
+  }
+
+  private isModelAllowedByProviderFilter(model: BrainModelDescriptor): boolean {
+    const providerId = model.providerId ?? this.options.config.defaultProvider;
+    const filter = this.serverConfig.modelProviderFilters?.[providerId];
+    if (filter?.enabled === false) {
+      return false;
+    }
+    if (filter?.freeOnly === true && model.free !== true) {
+      return false;
+    }
+    return true;
   }
 }
 
@@ -414,6 +722,8 @@ function normalizeServerConfig(config?: BrainServerConfig): BrainServerConfig {
     host: config?.host ?? '127.0.0.1',
     port: config?.port ?? 8787,
     apiKeys,
+    apiKeyRoutes: config?.apiKeyRoutes ?? {},
+    modelProviderFilters: config?.modelProviderFilters ?? {},
     requireAuth: config?.requireAuth ?? true,
     publicBaseUrl: config?.publicBaseUrl,
     auditLogPath: config?.auditLogPath,
@@ -435,6 +745,46 @@ async function atomicWriteJson(filePath: string, value: unknown): Promise<void> 
   await mkdir(dir, { recursive: true });
   await writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
   await rename(tmp, filePath);
+}
+
+function normalizeBaseUrl(baseUrl?: string): string {
+  const raw = (baseUrl?.trim() || 'https://api.openai.com/v1').replace(/\/+$/, '');
+  const url = new URL(raw);
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error('baseUrl must use http or https');
+  }
+  return raw;
+}
+
+function resolveProviderId(config: BrainConfig, requestedId: string | undefined, displayName: string | undefined, baseUrl: string): string {
+  if (requestedId?.trim()) {
+    return normalizeProviderId(requestedId);
+  }
+
+  const base = normalizeProviderId(displayName || new URL(baseUrl).host || 'api-key-provider');
+  let candidate = base;
+  let index = 2;
+  while (config.providers[candidate]) {
+    candidate = `${base}-${index}`;
+    index += 1;
+  }
+  return candidate;
+}
+
+function normalizeProviderId(value: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  if (!normalized) {
+    throw new Error('providerId must contain letters or numbers');
+  }
+  return normalized;
+}
+
+function addUnique(values: string[], value: string): string[] {
+  return values.includes(value) ? values : [...values, value];
 }
 
 function renderConsoleHtml(): string {
@@ -482,22 +832,33 @@ function renderConsoleHtml(): string {
     section { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 16px; min-width: 0; }
     .wide { grid-column: 1 / -1; }
     .row { display: flex; gap: 10px; align-items: center; margin-top: 10px; min-width: 0; }
-    code, input { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    input { width: 100%; min-width: 0; color: var(--text); background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 10px; }
+    code, input, select { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    input, select { width: 100%; min-width: 0; color: var(--text); background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 10px; }
     button { border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; background: transparent; color: var(--text); cursor: pointer; white-space: nowrap; }
     button.primary { background: var(--accent); border-color: var(--accent); color: white; }
     button.secondary { border-color: var(--accent-2); color: var(--accent-2); }
     button.danger { border-color: var(--danger); color: var(--danger); }
     ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
     .key { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+    .key-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px; display: grid; gap: 10px; }
+    .key-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 10px; align-items: center; }
     .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 1px solid var(--line); border-radius: 6px; padding: 10px; color: var(--muted); }
     .meta { display: grid; gap: 8px; color: var(--muted); font-size: 14px; }
     .notice { color: var(--muted); font-size: 13px; }
+    .stack { display: grid; gap: 10px; }
+    .split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .check { display: inline-flex; gap: 8px; align-items: center; color: var(--muted); font-size: 14px; }
+    .check input { width: auto; }
+    .pill { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; font-size: 12px; color: var(--muted); }
+    .model-line { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+    .model-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .model-meta { margin-top: 3px; color: var(--muted); font-size: 12px; }
+    .source-actions { display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
     @media (max-width: 760px) {
       header { display: block; }
       .status { margin-top: 16px; }
-      .grid { grid-template-columns: 1fr; }
-      .row, .key { grid-template-columns: 1fr; flex-wrap: wrap; }
+      .grid, .split { grid-template-columns: 1fr; }
+      .row, .key, .key-actions { grid-template-columns: 1fr; flex-wrap: wrap; }
       button { width: 100%; }
     }
   </style>
@@ -543,11 +904,41 @@ function renderConsoleHtml(): string {
         </div>
         <p class="notice">These are local proxy keys, not Codex or OpenAI tokens. They are only used to access LocalBrain on 127.0.0.1.</p>
       </section>
+      <section class="wide">
+        <h2>Upstream API Keys</h2>
+        <div class="stack">
+          <div class="split">
+            <input id="upstreamName" placeholder="Provider name">
+            <input id="upstreamBaseUrl" placeholder="https://api.openai.com/v1">
+          </div>
+          <div class="split">
+            <input id="upstreamKey" type="password" placeholder="API key">
+            <input id="upstreamModel" placeholder="Optional default model">
+          </div>
+          <label class="check"><input id="makeDefault" type="checkbox">Use as default when model is available</label>
+          <div class="row">
+            <button class="primary" id="addUpstreamKey">Add API Key Provider</button>
+          </div>
+          <ul id="upstreamProviders"></ul>
+        </div>
+        <p class="notice">Stored upstream keys stay in the local config file. Clients still use the LocalBrain base URL and local proxy key.</p>
+      </section>
+      <section class="wide">
+        <h2>Model Sources</h2>
+        <ul id="modelSources"></ul>
+        <p class="notice">Disable a source to keep LocalBrain from listing or using its models. Free-only keeps only models marked as free for that source.</p>
+      </section>
+      <section class="wide">
+        <h2>Models</h2>
+        <label class="check"><input id="freeOnly" type="checkbox">Only show free models</label>
+        <ul id="models"></ul>
+      </section>
     </div>
   </main>
   <script>
     let visible = false;
     let state = null;
+    let onlyFree = localStorage.getItem('localbrain.onlyFreeModels') === 'true';
     const $ = (id) => document.getElementById(id);
     async function refresh() {
       const res = await fetch('/brain/local-state');
@@ -558,7 +949,14 @@ function renderConsoleHtml(): string {
       $('configPath').textContent = state.configPath || 'not provided';
       $('auditLogPath').textContent = state.auditLogPath || 'disabled';
       $('providers').textContent = (state.providers || []).map((p) => p.id).join(', ');
+      $('freeOnly').checked = onlyFree;
       renderKeys();
+      renderUpstreamProviders();
+      renderModelSources();
+      renderModels();
+    }
+    function escapeHtml(value) {
+      return String(value || '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
     }
     function mask(key) {
       if (!key || key.length < 18) return '••••••';
@@ -566,9 +964,98 @@ function renderConsoleHtml(): string {
     }
     function renderKeys() {
       const keys = state?.apiKeys || [];
-      $('keys').innerHTML = keys.map((key, index) => '<li class="key"><div class="mono">' + (visible ? key : mask(key)) + '</div><button data-key="' + index + '">Copy</button></li>').join('');
+      const details = state?.apiKeyDetails || keys.map((key) => ({ key, route: null }));
+      const models = state?.availableModelDetails || [];
+      const options = (selected) => '<option value="">Default routing</option>' + models.map((model) => {
+        const value = escapeHtml(model.id);
+        const label = escapeHtml((model.displayName || model.id) + (model.providerId ? ' · ' + model.providerId : '') + (model.free === true ? ' · free' : ''));
+        return '<option value="' + value + '"' + (model.id === selected ? ' selected' : '') + '>' + label + '</option>';
+      }).join('');
+      $('keys').innerHTML = details.map((detail, index) => {
+        const key = detail.key;
+        const route = detail.route || {};
+        const assigned = route.model ? escapeHtml(route.model + (route.providerId ? ' · ' + route.providerId : '')) : 'Default routing';
+        return '<li class="key-card"><div class="mono">' + (visible ? escapeHtml(key) : mask(key)) + '</div>' +
+          '<div class="model-meta">Assigned model: ' + assigned + '</div>' +
+          '<div class="key-actions"><select data-key-model="' + index + '">' + options(route.model) + '</select>' +
+          '<button data-key-save="' + index + '">Assign</button><button data-key-clear="' + index + '">Clear</button><button data-key="' + index + '">Copy</button></div></li>';
+      }).join('');
       document.querySelectorAll('[data-key]').forEach((button) => {
         button.addEventListener('click', () => navigator.clipboard.writeText(keys[Number(button.dataset.key)]));
+      });
+      document.querySelectorAll('[data-key-save]').forEach((button) => {
+        button.addEventListener('click', () => {
+          const index = Number(button.dataset.keySave);
+          const select = document.querySelector('[data-key-model="' + index + '"]');
+          setKeyModel(keys[index], select.value, false).catch((error) => alert(error.message));
+        });
+      });
+      document.querySelectorAll('[data-key-clear]').forEach((button) => {
+        button.addEventListener('click', () => setKeyModel(keys[Number(button.dataset.keyClear)], '', true).catch((error) => alert(error.message)));
+      });
+    }
+    function renderUpstreamProviders() {
+      const providers = state?.upstreamProviders || [];
+      if (providers.length === 0) {
+        $('upstreamProviders').innerHTML = '<li class="notice">No upstream API key providers yet.</li>';
+        return;
+      }
+      $('upstreamProviders').innerHTML = providers.map((provider) => (
+        '<li class="model-line"><div><div class="model-title">' + escapeHtml(provider.displayName || provider.id) + '</div>' +
+        '<div class="model-meta">' + escapeHtml(provider.id) + ' · ' + escapeHtml(provider.baseUrl) + '</div></div>' +
+        '<span class="pill">' + (provider.hasStoredApiKey ? 'stored key' : escapeHtml(provider.apiKeyEnv || 'env key')) + '</span></li>'
+      )).join('');
+    }
+    function renderModels() {
+      const models = (state?.availableModelDetails || []).filter((model) => !onlyFree || model.free === true);
+      if (models.length === 0) {
+        $('models').innerHTML = '<li class="notice">No models match the current filter.</li>';
+        return;
+      }
+      $('models').innerHTML = models.map((model) => (
+        '<li class="model-line"><div><div class="model-title">' + escapeHtml(model.displayName || model.id) + '</div>' +
+        '<div class="model-meta">' + escapeHtml(model.id) + (model.providerId ? ' · ' + escapeHtml(model.providerId) : '') + '</div></div>' +
+        '<span class="pill">' + (model.free === true ? 'free' : 'paid/unknown') + '</span></li>'
+      )).join('');
+    }
+    function renderModelSources() {
+      const providers = state?.providers || [];
+      const filters = state?.modelProviderFilters || {};
+      if (providers.length === 0) {
+        $('modelSources').innerHTML = '<li class="notice">No model sources are registered.</li>';
+        return;
+      }
+      $('modelSources').innerHTML = providers.map((provider, index) => {
+        const filter = filters[provider.id] || {};
+        const enabled = filter.enabled !== false;
+        const freeOnly = filter.freeOnly === true;
+        return '<li class="model-line"><div><div class="model-title">' + escapeHtml(provider.displayName || provider.id) + '</div>' +
+          '<div class="model-meta">' + escapeHtml(provider.id) + ' · ' + escapeHtml(provider.kind) + '</div></div>' +
+          '<div class="source-actions">' +
+          '<label class="check"><input type="checkbox" data-source-enabled="' + index + '"' + (enabled ? ' checked' : '') + '>Enabled</label>' +
+          '<label class="check"><input type="checkbox" data-source-free="' + index + '"' + (freeOnly ? ' checked' : '') + '>Free only</label>' +
+          '<button data-source-only-free="' + index + '">Use only free</button>' +
+          '</div></li>';
+      }).join('');
+      document.querySelectorAll('[data-source-enabled]').forEach((input) => {
+        input.addEventListener('change', () => {
+          const provider = providers[Number(input.dataset.sourceEnabled)];
+          const filter = filters[provider.id] || {};
+          setProviderFilter(provider.id, input.checked, filter.freeOnly === true, false).catch((error) => alert(error.message));
+        });
+      });
+      document.querySelectorAll('[data-source-free]').forEach((input) => {
+        input.addEventListener('change', () => {
+          const provider = providers[Number(input.dataset.sourceFree)];
+          const filter = filters[provider.id] || {};
+          setProviderFilter(provider.id, filter.enabled !== false, input.checked, false).catch((error) => alert(error.message));
+        });
+      });
+      document.querySelectorAll('[data-source-only-free]').forEach((button) => {
+        button.addEventListener('click', () => {
+          const provider = providers[Number(button.dataset.sourceOnlyFree)];
+          setProviderFilter(provider.id, true, true, true).catch((error) => alert(error.message));
+        });
       });
     }
     async function createKey(replace) {
@@ -582,12 +1069,63 @@ function renderConsoleHtml(): string {
       visible = true;
       renderKeys();
     }
+    async function addUpstreamKey() {
+      const payload = {
+        displayName: $('upstreamName').value,
+        baseUrl: $('upstreamBaseUrl').value,
+        apiKey: $('upstreamKey').value,
+        model: $('upstreamModel').value,
+        makeDefault: $('makeDefault').checked
+      };
+      const res = await fetch('/brain/admin/upstream-api-keys', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body?.error?.message || 'Failed to add upstream key');
+      state = body.state;
+      $('upstreamKey').value = '';
+      renderUpstreamProviders();
+      renderModelSources();
+      renderModels();
+    }
+    async function setProviderFilter(providerId, enabled, freeOnly, only) {
+      const res = await fetch('/brain/admin/provider-model-filter', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ providerId, enabled, freeOnly, only })
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body?.error?.message || 'Failed to update model source');
+      state = body.state;
+      renderKeys();
+      renderModelSources();
+      renderModels();
+    }
+    async function setKeyModel(apiKey, model, clear) {
+      const res = await fetch('/brain/admin/key-model', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ apiKey, model, clear })
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body?.error?.message || 'Failed to update key model');
+      state = body.state;
+      renderKeys();
+    }
     document.querySelectorAll('[data-copy]').forEach((button) => {
       button.addEventListener('click', () => navigator.clipboard.writeText($(button.dataset.copy).value));
     });
     $('newKey').addEventListener('click', () => createKey(false));
     $('replaceKey').addEventListener('click', () => createKey(true));
     $('toggleKeys').addEventListener('click', () => { visible = !visible; renderKeys(); });
+    $('addUpstreamKey').addEventListener('click', () => addUpstreamKey().catch((error) => alert(error.message)));
+    $('freeOnly').addEventListener('change', () => {
+      onlyFree = $('freeOnly').checked;
+      localStorage.setItem('localbrain.onlyFreeModels', String(onlyFree));
+      renderModels();
+    });
     refresh().catch((error) => {
       $('status').textContent = 'Error';
       console.error(error);

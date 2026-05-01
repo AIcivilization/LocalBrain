@@ -182,6 +182,14 @@ export interface BrainServerConfig {
   host: string;
   port: number;
   apiKeys: string[];
+  apiKeyRoutes?: Record<string, {
+    providerId?: string;
+    model: string;
+  }>;
+  modelProviderFilters?: Record<string, {
+    enabled?: boolean;
+    freeOnly?: boolean;
+  }>;
   requireAuth: boolean;
   publicBaseUrl?: string;
   auditLogPath?: string;
@@ -195,6 +203,7 @@ export interface BrainRouteConfig {
 export interface BrainProviderConfig {
   type: BrainProviderKind;
   displayName?: string;
+  apiKey?: string;
   apiKeyEnv?: string;
   baseUrl?: string;
   localOnly?: boolean;
