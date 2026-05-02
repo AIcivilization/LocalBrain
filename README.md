@@ -10,6 +10,9 @@ It runs on `127.0.0.1`, exposes OpenAI-style endpoints, and lets local apps use 
 - Local OpenAI-compatible HTTP gateway
 - `/v1/chat/completions`, `/v1/responses`, and `/v1/models`
 - Local API key generation and rotation
+- Upstream OpenAI-compatible API key registration through LocalBrain
+- Per-key model routing, so one local key can be pinned to one provider model
+- Provider-level model source filters, including free-only mode
 - Default model selection from the menu bar
 - Codex ChatGPT local login provider for personal local testing
 - OpenCode local provider with dynamically discovered free model options
@@ -21,12 +24,16 @@ Download the DMG from GitHub Releases, open it, then drag `LocalBrain.app` into 
 
 Start `LocalBrain.app`. A LocalBrain icon appears in the upper-right menu bar.
 
+The top of the menu shows live status for LocalBrain, Codex, OpenCode, and configured upstream keys. Upstream keys are shown as a summary, such as `3/4 ready`, followed by one status row per configured upstream provider.
+
 The menu contains:
 
-- `Configure Codex`: checks whether local Codex ChatGPT login is available
-- `Configure OpenCode`: opens OpenCode login/setup when the local OpenCode provider needs attention
-- `Model`: selects the default model, including Codex models, discovered OpenCode models, and discovered OpenAI-compatible models when configured
-- `Key`: copies `OPENAI_BASE_URL`, copies local API keys, generates new keys, and rotates keys
+- `Configure Codex`: checks whether local Codex ChatGPT login is available, and has an on/off switch for the Codex source
+- `Configure OpenCode`: opens OpenCode login/setup when the local OpenCode provider needs attention, and has an on/off switch for the OpenCode source
+- `Configure Upstream Key`: adds OpenAI-compatible upstream API keys, lists configured upstream providers, changes existing upstream keys, and has on/off switches for all upstream keys or one upstream provider
+- `Model`: selects the default model, including Codex models, discovered OpenCode models, and discovered OpenAI-compatible models when configured; it can filter the menu to free models only
+- `Model Sources`: enables or disables providers such as Codex and OpenCode, and can put a provider into free-only mode
+- `Key`: copies `OPENAI_BASE_URL`, copies local API keys, generates, rotates, deletes local keys, and can pin a key to a selected model
 - `Settings`: switches language, opens the web console, config file, audit log, refreshes status, or restarts/stops LocalBrain
 - `Quit`: exits LocalBrain from the bottom of the main menu
 
@@ -118,6 +125,19 @@ Open the local console:
 http://127.0.0.1:8787/
 ```
 
+Use the bilingual console or the menu-bar `Configure Upstream Key` item to add or change another upstream API key. Local apps still use LocalBrain's own `OPENAI_BASE_URL` and local proxy key; LocalBrain stores the upstream key in the local config file and uses it when routing to that provider. Upstream model choices are fetched from the upstream `/models` endpoint instead of being hardcoded. The macOS menu marks each configured upstream provider green when it is enabled and exposes at least one discovered model, or red when it is off or unavailable.
+
+Each local proxy key can also be assigned to a model from the console. When a key is assigned, LocalBrain forces requests made with that key to use the assigned model, even if the client sends a different `model` value. Calling `/v1/models` with that key returns only the assigned model, which makes the key suitable for giving one product one stable model route.
+
+Use `Model Sources`, or the switches under `Configure Codex`, `Configure OpenCode`, and `Configure Upstream Key`, to decide which providers LocalBrain is allowed to use. For example, turn off Codex and upstream keys, then choose OpenCode's `Use Only This Free Source` action when you want LocalBrain to expose and route only OpenCode models marked as free. Requests for disallowed models are moved to the first allowed model instead of escaping the filter.
+
+List only free models through the OpenAI-compatible models endpoint:
+
+```bash
+curl -H "authorization: Bearer $OPENAI_API_KEY" \
+  "http://127.0.0.1:8787/v1/models?free=true"
+```
+
 Check local Codex login:
 
 ```bash
@@ -196,13 +216,21 @@ macOS 使用方式：
 3. 启动 `LocalBrain.app`。
 4. 在右上角菜单栏中配置 Codex / OpenCode、选择模型、复制本地 Key。
 
+菜单顶部会显示 LocalBrain、Codex、OpenCode 和已配置上游 Key 的实时状态。上游 Key 会先显示汇总，例如 `3/4 可用`，然后按厂家逐行显示绿色可用或红色不可用/已关闭。
+
 菜单包含：
 
-- `Configure Codex`：检查本机 Codex ChatGPT 登录态
-- `Configure OpenCode`：检查或打开本机 OpenCode 配置
-- `Model`：选择默认模型，包含 Codex 模型和动态发现的 OpenCode 免费模型
-- `Key`：复制 `OPENAI_BASE_URL`、复制/生成/替换本地 API Key
+- `Configure Codex`：检查本机 Codex ChatGPT 登录态，并可用一级菜单中的开关单独停用/启用 Codex 来源
+- `Configure OpenCode`：检查或打开本机 OpenCode 配置，并可用一级菜单中的开关单独停用/启用 OpenCode 来源
+- `Configure Upstream Key` / `配置上游 Key`：添加 OpenAI-compatible 上游 API Key，查看已添加的厂家，更改已有上游 Key，并可整体或按厂家停用/启用上游 Key
+- `Model`：选择默认模型，包含 Codex、OpenCode 和 OpenAI-compatible 上游模型，并可只显示免费模型
+- `Model Sources`：按 provider 控制模型来源，可关闭 Codex/OpenCode/上游 API，也可只允许某个来源的免费模型
+- `Key`：复制 `OPENAI_BASE_URL`、复制/生成/替换/删除本地 API Key，并给每个本地 Key 指定固定模型
 - `Settings`：切换中英文、打开控制台、配置文件、审计日志，或重启/停止 LocalBrain
 - `Quit`：退出 LocalBrain，位于主菜单最底部
+
+本地 Key 可以绑定到指定模型。产品侧只需要使用不同的 LocalBrain Key，LocalBrain 会自动把请求固定路由到对应模型；如果开启了 `Model Sources` 或一级配置菜单里的开关，请求会被限制在允许的模型范围内。例如只想用 OpenCode 免费模型时，关闭 Codex 和上游 Key，只保留 OpenCode，并对 OpenCode 选择“只用这个免费来源”。
+
+控制台支持中英文切换。添加上游 Key 时，先填写 Base URL 和 API Key，然后点击“拉取模型”，LocalBrain 会从上游 `/models` 接口获取模型列表供选择。
 
 本项目适合本地个人测试。Codex/ChatGPT 本地订阅模式不建议用于正式产品发布。

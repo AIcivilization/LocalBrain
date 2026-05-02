@@ -60,8 +60,8 @@ export function validateBrainConfig(config: BrainConfig): BrainConfigValidationR
     }
 
     if (providerConfig.type === 'openai-api-key' || providerConfig.type === 'vercel-ai-sdk') {
-      if (!providerConfig.apiKeyEnv) {
-        errors.push(`provider ${providerId} requires apiKeyEnv`);
+      if (!providerConfig.apiKeyEnv && !providerConfig.apiKey) {
+        errors.push(`provider ${providerId} requires apiKeyEnv or apiKey`);
       }
       if (providerConfig.type === 'vercel-ai-sdk') {
         warnings.push(`provider ${providerId} is treated as OpenAI-compatible; set baseUrl to an AI Gateway / compatible endpoint`);
@@ -103,6 +103,25 @@ export function validateBrainConfig(config: BrainConfig): BrainConfigValidationR
     if (config.server.requireAuth && config.server.apiKeys.length === 0 && !process.env.BRAIN_API_KEY) {
       errors.push('server.apiKeys must contain at least one key when server.requireAuth=true');
     }
+    for (const [apiKey, route] of Object.entries(config.server.apiKeyRoutes ?? {})) {
+      if (!config.server.apiKeys.includes(apiKey) && process.env.BRAIN_API_KEY !== apiKey) {
+        warnings.push('server.apiKeyRoutes contains an assignment for a key not listed in server.apiKeys');
+      }
+      if (!route.model) {
+        errors.push('server.apiKeyRoutes entries must include model');
+      }
+      if (route.providerId && !config.providers?.[route.providerId]) {
+        errors.push(`server.apiKeyRoutes providerId ${route.providerId} is not declared in providers`);
+      }
+      if (route.providerId && config.providers?.[route.providerId]?.disabled) {
+        errors.push(`server.apiKeyRoutes providerId ${route.providerId} is disabled`);
+      }
+    }
+    for (const providerId of Object.keys(config.server.modelProviderFilters ?? {})) {
+      if (!config.providers?.[providerId]) {
+        errors.push(`server.modelProviderFilters providerId ${providerId} is not declared in providers`);
+      }
+    }
   }
 
   return {
@@ -138,7 +157,7 @@ export function createBrainRuntimeFromConfig(config: BrainConfig): {
   };
 }
 
-function registerConfiguredProvider(
+export function registerConfiguredProvider(
   registry: BrainProviderRegistry,
   providerId: string,
   providerConfig: BrainProviderConfig,
@@ -198,6 +217,7 @@ function registerConfiguredProvider(
       kind: providerConfig.type,
       baseUrl: providerConfig.baseUrl ?? 'https://api.openai.com/v1',
       displayName: providerConfig.displayName,
+      apiKey: providerConfig.apiKey,
       apiKeyEnv: providerConfig.apiKeyEnv ?? 'OPENAI_API_KEY',
       localOnly: providerConfig.localOnly,
       experimental: providerConfig.experimental,

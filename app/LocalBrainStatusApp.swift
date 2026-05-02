@@ -14,6 +14,9 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
     private var showKeys = false
     private var lastState: [String: Any] = [:]
     private var timer: Timer?
+    private weak var upstreamApiKeyField: NSSecureTextField?
+    private weak var upstreamBaseURLField: NSTextField?
+    private weak var upstreamModelPopup: NSPopUpButton?
     private lazy var projectRoot: URL = prepareProjectRoot()
     private var language: AppLanguage {
         get {
@@ -22,6 +25,14 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         }
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: "LocalBrain.language")
+        }
+    }
+    private var showFreeModelsOnly: Bool {
+        get {
+            UserDefaults.standard.bool(forKey: "LocalBrain.showFreeModelsOnly")
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "LocalBrain.showFreeModelsOnly")
         }
     }
 
@@ -130,19 +141,39 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         menu.addItem(coloredItem(title: serviceOK ? text("● LocalBrain: running", "\u{25CF} LocalBrain\u{FF1A}\u{8FD0}\u{884C}\u{4E2D}") : text("● LocalBrain: not running", "\u{25CF} LocalBrain\u{FF1A}\u{672A}\u{8FD0}\u{884C}"), ok: serviceOK))
         menu.addItem(coloredItem(title: codexOK ? text("● Codex: ready", "\u{25CF} Codex\u{FF1A}\u{53EF}\u{7528}") : text("● Codex: setup needed", "\u{25CF} Codex\u{FF1A}\u{9700}\u{8981}\u{914D}\u{7F6E}"), ok: codexOK))
         menu.addItem(coloredItem(title: opencodeOK ? text("● OpenCode: ready", "\u{25CF} OpenCode\u{FF1A}\u{53EF}\u{7528}") : text("● OpenCode: setup needed", "\u{25CF} OpenCode\u{FF1A}\u{9700}\u{8981}\u{914D}\u{7F6E}"), ok: opencodeOK))
+        addUpstreamStatusItems(to: menu)
         menu.addItem(NSMenuItem.separator())
 
-        let configure = NSMenuItem(title: text("Configure Codex", "\u{914D}\u{7F6E} Codex"), action: #selector(configureCodex), keyEquivalent: "")
-        configure.target = self
+        let configure = NSMenuItem(title: providerRootTitle(text("Configure Codex", "\u{914D}\u{7F6E} Codex"), providerId: "codex-chatgpt-local"), action: nil, keyEquivalent: "")
+        configure.state = providerFilterEnabled(providerId: "codex-chatgpt-local") ? .on : .off
+        configure.submenu = providerConfigurationMenu(
+            providerId: "codex-chatgpt-local",
+            configureTitle: text("Check / Configure Codex", "\u{68C0}\u{67E5} / \u{914D}\u{7F6E} Codex"),
+            configureAction: #selector(configureCodex)
+        )
         menu.addItem(configure)
 
-        let configureOpenCode = NSMenuItem(title: text("Configure OpenCode", "\u{914D}\u{7F6E} OpenCode"), action: #selector(configureOpenCode), keyEquivalent: "")
-        configureOpenCode.target = self
-        menu.addItem(configureOpenCode)
+        let configureOpenCodeItem = NSMenuItem(title: providerRootTitle(text("Configure OpenCode", "\u{914D}\u{7F6E} OpenCode"), providerId: "opencode-local"), action: nil, keyEquivalent: "")
+        configureOpenCodeItem.state = providerFilterEnabled(providerId: "opencode-local") ? .on : .off
+        configureOpenCodeItem.submenu = providerConfigurationMenu(
+            providerId: "opencode-local",
+            configureTitle: text("Check / Configure OpenCode", "\u{68C0}\u{67E5} / \u{914D}\u{7F6E} OpenCode"),
+            configureAction: #selector(configureOpenCode)
+        )
+        menu.addItem(configureOpenCodeItem)
+
+        let configureUpstreamKey = NSMenuItem(title: upstreamRootTitle(), action: nil, keyEquivalent: "")
+        configureUpstreamKey.state = upstreamProvidersEnabled() ? .on : .off
+        configureUpstreamKey.submenu = configureUpstreamKeyMenu()
+        menu.addItem(configureUpstreamKey)
 
         let modelRoot = NSMenuItem(title: text("Model", "\u{6A21}\u{578B}"), action: nil, keyEquivalent: "")
         modelRoot.submenu = modelMenu()
         menu.addItem(modelRoot)
+
+        let sourceRoot = NSMenuItem(title: text("Model Sources", "\u{6A21}\u{578B}\u{6765}\u{6E90}"), action: nil, keyEquivalent: "")
+        sourceRoot.submenu = modelSourcesMenu()
+        menu.addItem(sourceRoot)
 
         let keyRoot = NSMenuItem(title: "Key", action: nil, keyEquivalent: "")
         keyRoot.submenu = keyMenu()
@@ -159,18 +190,32 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
     private func modelMenu() -> NSMenu {
         let modelMenu = NSMenu()
         let selected = lastState["defaultModel"] as? String ?? "gpt-5.5-mini"
-        let models = lastState["availableModels"] as? [String] ?? [selected]
+        let modelDetails = lastState["availableModelDetails"] as? [[String: Any]] ?? []
+        let models: [(id: String, providerId: String?, free: Bool)] = modelDetails.isEmpty
+            ? (lastState["availableModels"] as? [String] ?? [selected]).map { ($0, nil, false) }
+            : modelDetails.compactMap { detail in
+                guard let id = detail["id"] as? String else { return nil }
+                return (id, detail["providerId"] as? String, (detail["free"] as? Bool) == true)
+            }
+        let visibleModels = showFreeModelsOnly ? models.filter { $0.free } : models
 
-        if models.isEmpty {
-            modelMenu.addItem(disabledItem(text("No available models", "\u{6CA1}\u{6709}\u{53EF}\u{9009}\u{6A21}\u{578B}")))
+        let freeOnly = NSMenuItem(title: text("Only Show Free Models", "\u{53EA}\u{663E}\u{793A}\u{514D}\u{8D39}\u{6A21}\u{578B}"), action: #selector(toggleFreeModelsOnly), keyEquivalent: "")
+        freeOnly.target = self
+        freeOnly.state = showFreeModelsOnly ? .on : .off
+        modelMenu.addItem(freeOnly)
+        modelMenu.addItem(NSMenuItem.separator())
+
+        if visibleModels.isEmpty {
+            modelMenu.addItem(disabledItem(showFreeModelsOnly ? text("No free models", "\u{6CA1}\u{6709}\u{514D}\u{8D39}\u{6A21}\u{578B}") : text("No available models", "\u{6CA1}\u{6709}\u{53EF}\u{9009}\u{6A21}\u{578B}")))
             return modelMenu
         }
 
-        for model in models {
-            let item = NSMenuItem(title: model, action: #selector(selectModel(_:)), keyEquivalent: "")
+        for model in visibleModels {
+            let suffix = model.free ? " - free" : ""
+            let item = NSMenuItem(title: "\(model.id)\(suffix)", action: #selector(selectModel(_:)), keyEquivalent: "")
             item.target = self
-            item.representedObject = model
-            item.state = model == selected ? .on : .off
+            item.representedObject = model.id
+            item.state = model.id == selected ? .on : .off
             modelMenu.addItem(item)
         }
         modelMenu.addItem(NSMenuItem.separator())
@@ -178,9 +223,107 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         return modelMenu
     }
 
+    private func modelSourcesMenu() -> NSMenu {
+        let menu = NSMenu()
+        let providers = lastState["providers"] as? [[String: Any]] ?? []
+        let filters = lastState["modelProviderFilters"] as? [String: Any] ?? [:]
+
+        if providers.isEmpty {
+            menu.addItem(disabledItem(text("No model sources", "\u{6CA1}\u{6709}\u{6A21}\u{578B}\u{6765}\u{6E90}")))
+            return menu
+        }
+
+        for provider in providers {
+            guard let providerId = provider["id"] as? String else { continue }
+            let filter = filters[providerId] as? [String: Any] ?? [:]
+            let enabled = (filter["enabled"] as? Bool) != false
+            let freeOnly = (filter["freeOnly"] as? Bool) == true
+            let displayName = provider["displayName"] as? String ?? providerId
+
+            let root = NSMenuItem(title: "\(displayName)\(enabled ? "" : " - off")\(freeOnly ? " - free only" : "")", action: nil, keyEquivalent: "")
+            let source = NSMenu()
+
+            let enabledItem = NSMenuItem(title: text("Enabled", "\u{542F}\u{7528}"), action: #selector(updateProviderFilter(_:)), keyEquivalent: "")
+            enabledItem.target = self
+            enabledItem.state = enabled ? .on : .off
+            enabledItem.representedObject = [
+                "providerId": providerId,
+                "enabled": !enabled,
+                "freeOnly": freeOnly,
+                "only": false
+            ]
+            source.addItem(enabledItem)
+
+            let freeItem = NSMenuItem(title: text("Free Only", "\u{53EA}\u{7528}\u{514D}\u{8D39}\u{6A21}\u{578B}"), action: #selector(updateProviderFilter(_:)), keyEquivalent: "")
+            freeItem.target = self
+            freeItem.state = freeOnly ? .on : .off
+            freeItem.representedObject = [
+                "providerId": providerId,
+                "enabled": enabled,
+                "freeOnly": !freeOnly,
+                "only": false
+            ]
+            source.addItem(freeItem)
+
+            let onlyFree = NSMenuItem(title: text("Use Only This Free Source", "\u{53EA}\u{7528}\u{8FD9}\u{4E2A}\u{514D}\u{8D39}\u{6765}\u{6E90}"), action: #selector(updateProviderFilter(_:)), keyEquivalent: "")
+            onlyFree.target = self
+            onlyFree.representedObject = [
+                "providerId": providerId,
+                "enabled": true,
+                "freeOnly": true,
+                "only": true
+            ]
+            source.addItem(onlyFree)
+
+            root.submenu = source
+            menu.addItem(root)
+        }
+
+        return menu
+    }
+
+    private func addUpstreamStatusItems(to menu: NSMenu) {
+        let statuses = upstreamProviderStatuses()
+        guard !statuses.isEmpty else { return }
+
+        let usableCount = statuses.filter { $0.usable }.count
+        let summary = text(
+            "\u{25CF} Upstream Keys: \(usableCount)/\(statuses.count) ready",
+            "\u{25CF} \u{4E0A}\u{6E38} Key\u{FF1A}\(usableCount)/\(statuses.count) \u{53EF}\u{7528}"
+        )
+        menu.addItem(coloredItem(title: summary, ok: usableCount == statuses.count))
+
+        for status in statuses {
+            let stateText: String
+            if !status.enabled {
+                stateText = text("off", "\u{5DF2}\u{5173}\u{95ED}")
+            } else if status.usable {
+                stateText = text("ready", "\u{53EF}\u{7528}")
+            } else {
+                stateText = text("unavailable", "\u{4E0D}\u{53EF}\u{7528}")
+            }
+            menu.addItem(coloredItem(title: "\u{25CF} \(status.displayName): \(stateText)", ok: status.usable))
+        }
+    }
+
+    private func upstreamProviderStatuses() -> [(id: String, displayName: String, enabled: Bool, usable: Bool)] {
+        let providers = lastState["upstreamProviders"] as? [[String: Any]] ?? []
+        let models = lastState["availableModelDetails"] as? [[String: Any]] ?? []
+        let modelProviderIds = Set(models.compactMap { $0["providerId"] as? String })
+
+        return providers.compactMap { provider in
+            guard let providerId = provider["id"] as? String else { return nil }
+            let displayName = provider["displayName"] as? String ?? providerId
+            let enabled = providerFilterEnabled(providerId: providerId)
+            let usable = enabled && modelProviderIds.contains(providerId)
+            return (id: providerId, displayName: displayName, enabled: enabled, usable: usable)
+        }
+    }
+
     private func keyMenu() -> NSMenu {
         let keyMenu = NSMenu()
         let keys = lastState["apiKeys"] as? [String] ?? []
+        let keyRoutes = lastState["apiKeyRoutes"] as? [String: Any] ?? [:]
         let baseURL = lastState["openAIBaseUrl"] as? String ?? "http://127.0.0.1:8787/v1"
 
         keyMenu.addItem(disabledItem("OPENAI_BASE_URL"))
@@ -190,10 +333,12 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         if keys.isEmpty {
             keyMenu.addItem(disabledItem(text("No local keys", "\u{6CA1}\u{6709}\u{672C}\u{5730} Key")))
         } else {
-            for (index, key) in keys.enumerated() {
-                let item = NSMenuItem(title: showKeys ? text("Copy \(key)", "\u{590D}\u{5236} \(key)") : text("Copy \(mask(key))", "\u{590D}\u{5236} \(mask(key))"), action: #selector(copyKey(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = index
+            for key in keys {
+                let route = keyRoutes[key] as? [String: Any]
+                let assignedModel = route?["model"] as? String
+                let titleKey = showKeys ? key : mask(key)
+                let item = NSMenuItem(title: assignedModel == nil ? titleKey : "\(titleKey) -> \(assignedModel!)", action: nil, keyEquivalent: "")
+                item.submenu = localKeyMenu(key: key, assignedModel: assignedModel)
                 keyMenu.addItem(item)
             }
         }
@@ -203,6 +348,185 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         keyMenu.addItem(actionItem(text("Generate New Key", "\u{751F}\u{6210}\u{65B0} Key"), #selector(generateKey)))
         keyMenu.addItem(actionItem(text("Replace With New Key", "\u{66FF}\u{6362}\u{4E3A}\u{65B0} Key"), #selector(replaceKey)))
         return keyMenu
+    }
+
+    private func configureUpstreamKeyMenu() -> NSMenu {
+        let menu = NSMenu()
+        let providers = lastState["upstreamProviders"] as? [[String: Any]] ?? []
+        let providerIds = providers.compactMap { $0["id"] as? String }
+
+        if !providerIds.isEmpty {
+            let enabled = upstreamProvidersEnabled()
+            let enabledItem = NSMenuItem(title: text("Enabled", "\u{542F}\u{7528}"), action: #selector(updateProviderFilters(_:)), keyEquivalent: "")
+            enabledItem.target = self
+            enabledItem.state = enabled ? .on : .off
+            enabledItem.representedObject = providerIds.map { providerId in
+                [
+                    "providerId": providerId,
+                    "enabled": !enabled,
+                    "freeOnly": providerFilterFreeOnly(providerId: providerId),
+                    "only": false
+                ] as [String: Any]
+            }
+            menu.addItem(enabledItem)
+            menu.addItem(NSMenuItem.separator())
+        }
+
+        menu.addItem(actionItem(text("Add", "\u{6DFB}\u{52A0}"), #selector(addUpstreamApiKey)))
+        guard !providers.isEmpty else {
+            return menu
+        }
+
+        menu.addItem(NSMenuItem.separator())
+        for provider in providers {
+            let providerId = provider["id"] as? String ?? ""
+            let displayName = provider["displayName"] as? String ?? providerId
+            let root = NSMenuItem(title: displayName, action: nil, keyEquivalent: "")
+            let providerMenu = NSMenu()
+            providerMenu.addItem(disabledItem(providerId))
+            if let baseUrl = provider["baseUrl"] as? String {
+                providerMenu.addItem(disabledItem(baseUrl))
+            }
+            providerMenu.addItem(NSMenuItem.separator())
+            addProviderFilterItems(to: providerMenu, providerId: providerId)
+            providerMenu.addItem(NSMenuItem.separator())
+            let update = NSMenuItem(title: text("Change", "\u{66F4}\u{6539}"), action: #selector(updateUpstreamApiKey(_:)), keyEquivalent: "")
+            update.target = self
+            update.representedObject = provider
+            providerMenu.addItem(update)
+            root.submenu = providerMenu
+            menu.addItem(root)
+        }
+        return menu
+    }
+
+    private func providerConfigurationMenu(providerId: String, configureTitle: String, configureAction: Selector) -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(actionItem(configureTitle, configureAction))
+        menu.addItem(NSMenuItem.separator())
+        addProviderFilterItems(to: menu, providerId: providerId)
+        return menu
+    }
+
+    private func addProviderFilterItems(to menu: NSMenu, providerId: String) {
+        let enabled = providerFilterEnabled(providerId: providerId)
+        let freeOnly = providerFilterFreeOnly(providerId: providerId)
+
+        let enabledItem = NSMenuItem(title: text("Enabled", "\u{542F}\u{7528}"), action: #selector(updateProviderFilter(_:)), keyEquivalent: "")
+        enabledItem.target = self
+        enabledItem.state = enabled ? .on : .off
+        enabledItem.representedObject = [
+            "providerId": providerId,
+            "enabled": !enabled,
+            "freeOnly": freeOnly,
+            "only": false
+        ]
+        menu.addItem(enabledItem)
+
+        let onlyThisSource = NSMenuItem(title: text("Use Only This Source", "\u{53EA}\u{7528}\u{8FD9}\u{4E2A}\u{6765}\u{6E90}"), action: #selector(updateProviderFilter(_:)), keyEquivalent: "")
+        onlyThisSource.target = self
+        onlyThisSource.representedObject = [
+            "providerId": providerId,
+            "enabled": true,
+            "freeOnly": freeOnly,
+            "only": true
+        ]
+        menu.addItem(onlyThisSource)
+    }
+
+    private func providerRootTitle(_ title: String, providerId: String) -> String {
+        let enabled = providerFilterEnabled(providerId: providerId)
+        let freeOnly = providerFilterFreeOnly(providerId: providerId)
+        let status = enabled ? text("On", "\u{5F00}") : text("Off", "\u{5173}")
+        let freeSuffix = freeOnly ? text(", free only", "\u{FF0C}\u{53EA}\u{514D}\u{8D39}") : ""
+        return "\(title) (\(status)\(freeSuffix))"
+    }
+
+    private func upstreamRootTitle() -> String {
+        let title = text("Configure Upstream Key", "\u{914D}\u{7F6E}\u{4E0A}\u{6E38} Key")
+        let providers = lastState["upstreamProviders"] as? [[String: Any]] ?? []
+        guard !providers.isEmpty else { return "\(title) (\(text("No keys", "\u{65E0} Key")))" }
+        let status = upstreamProvidersEnabled() ? text("On", "\u{5F00}") : text("Off", "\u{5173}")
+        return "\(title) (\(status))"
+    }
+
+    private func upstreamProvidersEnabled() -> Bool {
+        let providers = lastState["upstreamProviders"] as? [[String: Any]] ?? []
+        guard !providers.isEmpty else { return false }
+        return providers.contains { provider in
+            guard let providerId = provider["id"] as? String else { return false }
+            return providerFilterEnabled(providerId: providerId)
+        }
+    }
+
+    private func providerFilterEnabled(providerId: String) -> Bool {
+        let filters = lastState["modelProviderFilters"] as? [String: Any] ?? [:]
+        let filter = filters[providerId] as? [String: Any] ?? [:]
+        return (filter["enabled"] as? Bool) != false
+    }
+
+    private func providerFilterFreeOnly(providerId: String) -> Bool {
+        let filters = lastState["modelProviderFilters"] as? [String: Any] ?? [:]
+        let filter = filters[providerId] as? [String: Any] ?? [:]
+        return (filter["freeOnly"] as? Bool) == true
+    }
+
+    private func localKeyMenu(key: String, assignedModel: String?) -> NSMenu {
+        let menu = NSMenu()
+        let copy = NSMenuItem(title: showKeys ? text("Copy \(key)", "\u{590D}\u{5236} \(key)") : text("Copy \(mask(key))", "\u{590D}\u{5236} \(mask(key))"), action: #selector(copyKey(_:)), keyEquivalent: "")
+        copy.target = self
+        copy.representedObject = key
+        menu.addItem(copy)
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(disabledItem(assignedModel == nil ? text("Assigned: default routing", "\u{5DF2}\u{6307}\u{5B9A}\u{FF1A}\u{9ED8}\u{8BA4}\u{8DEF}\u{7531}") : text("Assigned: \(assignedModel!)", "\u{5DF2}\u{6307}\u{5B9A}\u{FF1A}\(assignedModel!)")))
+
+        let assign = NSMenuItem(title: text("Assign Current Model", "\u{6307}\u{5B9A}\u{4E3A}\u{5F53}\u{524D}\u{6A21}\u{578B}"), action: #selector(assignKeyToCurrentModel(_:)), keyEquivalent: "")
+        assign.target = self
+        assign.representedObject = key
+        menu.addItem(assign)
+
+        let assignModel = NSMenuItem(title: text("Assign Model", "\u{6307}\u{5B9A}\u{6A21}\u{578B}"), action: nil, keyEquivalent: "")
+        assignModel.submenu = keyModelAssignmentMenu(key: key, assignedModel: assignedModel)
+        menu.addItem(assignModel)
+
+        let clear = NSMenuItem(title: text("Clear Model Assignment", "\u{6E05}\u{9664}\u{6A21}\u{578B}\u{6307}\u{5B9A}"), action: #selector(clearKeyModel(_:)), keyEquivalent: "")
+        clear.target = self
+        clear.representedObject = key
+        clear.isEnabled = assignedModel != nil
+        menu.addItem(clear)
+
+        let delete = NSMenuItem(title: text("Delete Key", "\u{5220}\u{9664} Key"), action: #selector(deleteLocalKey(_:)), keyEquivalent: "")
+        delete.target = self
+        delete.representedObject = key
+        menu.addItem(delete)
+        return menu
+    }
+
+    private func keyModelAssignmentMenu(key: String, assignedModel: String?) -> NSMenu {
+        let menu = NSMenu()
+        let modelDetails = lastState["availableModelDetails"] as? [[String: Any]] ?? []
+        let models: [(id: String, providerId: String?, free: Bool)] = modelDetails.compactMap { detail in
+            guard let id = detail["id"] as? String else { return nil }
+            return (id, detail["providerId"] as? String, (detail["free"] as? Bool) == true)
+        }
+
+        if models.isEmpty {
+            menu.addItem(disabledItem(text("No available models", "\u{6CA1}\u{6709}\u{53EF}\u{9009}\u{6A21}\u{578B}")))
+            return menu
+        }
+
+        for model in models {
+            let title = "\(model.id)\(model.free ? " - free" : "")\(model.providerId == nil ? "" : " · \(model.providerId!)")"
+            let item = NSMenuItem(title: title, action: #selector(assignKeyToSelectedModel(_:)), keyEquivalent: "")
+            item.target = self
+            item.state = model.id == assignedModel ? .on : .off
+            item.representedObject = [
+                "apiKey": key,
+                "model": model.id
+            ]
+            menu.addItem(item)
+        }
+        return menu
     }
 
     private func settingsMenu() -> NSMenu {
@@ -293,6 +617,10 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
 
     @objc private func copyKey(_ sender: NSMenuItem) {
         let keys = lastState["apiKeys"] as? [String] ?? []
+        if let key = sender.representedObject as? String {
+            copy(key)
+            return
+        }
         guard let index = sender.representedObject as? Int, keys.indices.contains(index) else { return }
         copy(keys[index])
     }
@@ -300,6 +628,25 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
     @objc private func toggleKeys() {
         showKeys.toggle()
         rebuildMenu()
+    }
+
+    @objc private func toggleFreeModelsOnly() {
+        showFreeModelsOnly.toggle()
+        rebuildMenu()
+    }
+
+    @objc private func updateProviderFilter(_ sender: NSMenuItem) {
+        guard let body = sender.representedObject as? [String: Any] else { return }
+        _ = postJSON(url: "http://127.0.0.1:8787/brain/admin/provider-model-filter", body: body)
+        refreshState()
+    }
+
+    @objc private func updateProviderFilters(_ sender: NSMenuItem) {
+        guard let bodies = sender.representedObject as? [[String: Any]] else { return }
+        for body in bodies {
+            _ = postJSON(url: "http://127.0.0.1:8787/brain/admin/provider-model-filter", body: body)
+        }
+        refreshState()
     }
 
     @objc private func selectLanguage(_ sender: NSMenuItem) {
@@ -333,6 +680,157 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         }
         _ = postJSON(url: "http://127.0.0.1:8787/brain/admin/keys", body: ["replace": true])
         refreshState()
+    }
+
+    @objc private func assignKeyToCurrentModel(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        let model = lastState["defaultModel"] as? String ?? "gpt-5.5-mini"
+        _ = postJSON(url: "http://127.0.0.1:8787/brain/admin/key-model", body: [
+            "apiKey": key,
+            "model": model
+        ])
+        refreshState()
+    }
+
+    @objc private func assignKeyToSelectedModel(_ sender: NSMenuItem) {
+        guard let body = sender.representedObject as? [String: Any] else { return }
+        _ = postJSON(url: "http://127.0.0.1:8787/brain/admin/key-model", body: body)
+        refreshState()
+    }
+
+    @objc private func clearKeyModel(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        _ = postJSON(url: "http://127.0.0.1:8787/brain/admin/key-model", body: [
+            "apiKey": key,
+            "clear": true
+        ])
+        refreshState()
+    }
+
+    @objc private func deleteLocalKey(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        let alert = NSAlert()
+        alert.messageText = text("Delete local API key?", "\u{5220}\u{9664}\u{672C}\u{5730} API Key\u{FF1F}")
+        alert.informativeText = text("Products using this key will stop working until they switch to another LocalBrain key.", "\u{6B63}\u{5728}\u{4F7F}\u{7528}\u{8FD9}\u{4E2A} Key \u{7684}\u{4EA7}\u{54C1}\u{9700}\u{5207}\u{6362}\u{5230}\u{5176}\u{4ED6} LocalBrain Key\u{FF0C}\u{5426}\u{5219}\u{4F1A}\u{505C}\u{6B62}\u{5DE5}\u{4F5C}\u{3002}")
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: text("Delete", "\u{5220}\u{9664}"))
+        alert.addButton(withTitle: text("Cancel", "\u{53D6}\u{6D88}"))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        _ = postJSON(url: "http://127.0.0.1:8787/brain/admin/delete-key", body: [
+            "apiKey": key
+        ])
+        refreshState()
+    }
+
+    @objc private func addUpstreamApiKey() {
+        showUpstreamApiKeyDialog(provider: nil)
+    }
+
+    @objc private func updateUpstreamApiKey(_ sender: NSMenuItem) {
+        guard let provider = sender.representedObject as? [String: Any] else { return }
+        showUpstreamApiKeyDialog(provider: provider)
+    }
+
+    private func showUpstreamApiKeyDialog(provider: [String: Any]?) {
+        if !isHealthOK() {
+            startServerIfNeeded()
+        }
+        NSApp.activate(ignoringOtherApps: true)
+
+        let providerId = provider?["id"] as? String
+        let name = NSTextField(string: provider?["displayName"] as? String ?? "")
+        name.placeholderString = "Provider name"
+        let baseURL = NSTextField(string: provider?["baseUrl"] as? String ?? "https://api.openai.com/v1")
+        baseURL.placeholderString = "Base URL"
+        upstreamBaseURLField = baseURL
+        let apiKey = NSSecureTextField(string: "")
+        apiKey.placeholderString = "API key"
+        upstreamApiKeyField = apiKey
+        let pasteApiKey = NSButton(title: text("Paste", "\u{7C98}\u{8D34}"), target: self, action: #selector(pasteUpstreamApiKeyFromClipboard))
+        pasteApiKey.bezelStyle = .rounded
+        let apiKeyRow = NSStackView(views: [apiKey, pasteApiKey])
+        apiKeyRow.orientation = .horizontal
+        apiKeyRow.spacing = 8
+        apiKey.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        pasteApiKey.setContentHuggingPriority(.required, for: .horizontal)
+        let model = NSPopUpButton()
+        model.addItem(withTitle: text("Fetch models first (optional)", "\u{5148}\u{62C9}\u{53D6}\u{6A21}\u{578B}\u{FF08}\u{53EF}\u{9009}\u{FF09}"))
+        model.lastItem?.representedObject = ""
+        upstreamModelPopup = model
+        let fetchModels = NSButton(title: text("Fetch Models", "\u{62C9}\u{53D6}\u{6A21}\u{578B}"), target: self, action: #selector(fetchUpstreamModelsForDialog))
+        fetchModels.bezelStyle = .rounded
+        let modelRow = NSStackView(views: [model, fetchModels])
+        modelRow.orientation = .horizontal
+        modelRow.spacing = 8
+        model.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        fetchModels.setContentHuggingPriority(.required, for: .horizontal)
+        let makeDefault = NSButton(checkboxWithTitle: text("Use as default when model is available", "\u{6A21}\u{578B}\u{53EF}\u{7528}\u{65F6}\u{8BBE}\u{4E3A}\u{9ED8}\u{8BA4}"), target: nil, action: nil)
+
+        let stack = NSStackView(views: [name, baseURL, apiKeyRow, modelRow, makeDefault])
+        stack.orientation = .vertical
+        stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 4, left: 0, bottom: 0, right: 0)
+        stack.setFrameSize(NSSize(width: 360, height: 150))
+
+        let alert = NSAlert()
+        alert.messageText = providerId == nil
+            ? text("Add upstream API key", "\u{6DFB}\u{52A0}\u{4E0A}\u{6E38} API Key")
+            : text("Change upstream API key", "\u{66F4}\u{6539}\u{4E0A}\u{6E38} API Key")
+        alert.informativeText = text("LocalBrain will store this key locally and proxy compatible model calls through it.", "LocalBrain \u{4F1A}\u{5C06}\u{8FD9}\u{4E2A} Key \u{4FDD}\u{5B58}\u{5728}\u{672C}\u{5730}\u{FF0C}\u{5E76}\u{901A}\u{8FC7}\u{5B83}\u{4E2D}\u{8F6C}\u{6A21}\u{578B}\u{8BF7}\u{6C42}\u{3002}")
+        alert.accessoryView = stack
+        alert.addButton(withTitle: text("Add", "\u{6DFB}\u{52A0}"))
+        alert.addButton(withTitle: text("Cancel", "\u{53D6}\u{6D88}"))
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            upstreamApiKeyField = nil
+            upstreamBaseURLField = nil
+            upstreamModelPopup = nil
+            return
+        }
+        let response = postJSON(url: "http://127.0.0.1:8787/brain/admin/upstream-api-keys", body: [
+            "providerId": providerId ?? "",
+            "displayName": name.stringValue,
+            "baseUrl": baseURL.stringValue,
+            "apiKey": apiKey.stringValue,
+            "model": model.selectedItem?.representedObject as? String ?? "",
+            "makeDefault": makeDefault.state == .on
+        ])
+        if response == nil {
+            showAlert(title: text("API key was not added", "\u{672A}\u{6DFB}\u{52A0} API Key"), message: text("LocalBrain did not accept the upstream key. Check the service log for details.", "LocalBrain \u{672A}\u{63A5}\u{53D7}\u{8FD9}\u{4E2A}\u{4E0A}\u{6E38} Key\u{3002}\u{8BF7}\u{67E5}\u{770B}\u{670D}\u{52A1}\u{65E5}\u{5FD7}\u{3002}"))
+        }
+        upstreamApiKeyField = nil
+        upstreamBaseURLField = nil
+        upstreamModelPopup = nil
+        refreshState()
+    }
+
+    @objc private func pasteUpstreamApiKeyFromClipboard() {
+        guard let value = NSPasteboard.general.string(forType: .string),
+              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        upstreamApiKeyField?.stringValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @objc private func fetchUpstreamModelsForDialog() {
+        guard let baseURL = upstreamBaseURLField?.stringValue,
+              let apiKey = upstreamApiKeyField?.stringValue,
+              let popup = upstreamModelPopup else { return }
+
+        guard let response = postJSON(url: "http://127.0.0.1:8787/brain/admin/upstream-models", body: [
+            "baseUrl": baseURL,
+            "apiKey": apiKey
+        ]),
+              let models = response["models"] as? [String] else {
+            showAlert(title: text("Models were not fetched", "\u{672A}\u{62C9}\u{53D6}\u{6A21}\u{578B}"), message: text("Check the base URL and API key, then try again.", "\u{8BF7}\u{68C0}\u{67E5} Base URL \u{548C} API Key\u{FF0C}\u{7136}\u{540E}\u{91CD}\u{8BD5}\u{3002}"))
+            return
+        }
+
+        popup.removeAllItems()
+        popup.addItem(withTitle: text("Do not set default model", "\u{4E0D}\u{8BBE}\u{7F6E}\u{9ED8}\u{8BA4}\u{6A21}\u{578B}"))
+        popup.lastItem?.representedObject = ""
+        for model in models {
+            popup.addItem(withTitle: model)
+            popup.lastItem?.representedObject = model
+        }
     }
 
     @objc private func restartServer() {
@@ -423,7 +921,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
             result = json
         }.resume()
-        _ = sema.wait(timeout: .now() + 3.0)
+        _ = sema.wait(timeout: .now() + 10.0)
         return result
     }
 

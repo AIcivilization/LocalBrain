@@ -11,7 +11,8 @@ export interface OpenAICompatibleBrainProviderOptions {
   id: string;
   kind?: 'openai-api-key' | 'vercel-ai-sdk';
   baseUrl: string;
-  apiKeyEnv: string;
+  apiKey?: string;
+  apiKeyEnv?: string;
   displayName?: string;
   localOnly?: boolean;
   experimental?: boolean;
@@ -54,7 +55,8 @@ export class OpenAICompatibleBrainProvider implements BrainProvider {
   readonly id: string;
   readonly kind: 'openai-api-key' | 'vercel-ai-sdk';
   private readonly baseUrl: string;
-  private readonly apiKeyEnv: string;
+  private readonly apiKey?: string;
+  private readonly apiKeyEnv?: string;
   private readonly displayName: string;
   private readonly localOnly: boolean;
   private readonly experimental: boolean;
@@ -67,6 +69,7 @@ export class OpenAICompatibleBrainProvider implements BrainProvider {
     this.id = options.id;
     this.kind = options.kind ?? 'openai-api-key';
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
+    this.apiKey = options.apiKey;
     this.apiKeyEnv = options.apiKeyEnv;
     this.displayName = options.displayName ?? 'OpenAI-Compatible Brain Provider';
     this.localOnly = options.localOnly ?? (
@@ -88,10 +91,7 @@ export class OpenAICompatibleBrainProvider implements BrainProvider {
   }
 
   async generate(request: BrainProviderRequest): Promise<BrainProviderResponse> {
-    const apiKey = process.env[this.apiKeyEnv];
-    if (!apiKey) {
-      throw new Error(`missing API key env for OpenAI-compatible provider ${this.id}: ${this.apiKeyEnv}`);
-    }
+    const apiKey = this.resolveApiKey();
 
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
@@ -161,10 +161,7 @@ export class OpenAICompatibleBrainProvider implements BrainProvider {
       return this.modelCache.models;
     }
 
-    const apiKey = process.env[this.apiKeyEnv];
-    if (!apiKey) {
-      throw new Error(`missing API key env for OpenAI-compatible provider ${this.id}: ${this.apiKeyEnv}`);
-    }
+    const apiKey = this.resolveApiKey();
 
     const response = await fetch(`${this.baseUrl}/models`, {
       method: 'GET',
@@ -193,6 +190,15 @@ export class OpenAICompatibleBrainProvider implements BrainProvider {
       models,
     };
     return models;
+  }
+
+  private resolveApiKey(): string {
+    const apiKey = this.apiKey ?? (this.apiKeyEnv ? process.env[this.apiKeyEnv] : undefined);
+    if (!apiKey) {
+      const source = this.apiKeyEnv ? `env ${this.apiKeyEnv}` : 'stored provider apiKey';
+      throw new Error(`missing API key for OpenAI-compatible provider ${this.id}: ${source}`);
+    }
+    return apiKey;
   }
 }
 
