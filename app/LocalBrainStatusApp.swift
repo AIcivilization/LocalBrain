@@ -151,8 +151,8 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         configureOpenCode.target = self
         menu.addItem(configureOpenCode)
 
-        let configureUpstreamKey = NSMenuItem(title: text("Configure Upstream Key", "\u{914D}\u{7F6E}\u{4E0A}\u{6E38} Key"), action: #selector(addUpstreamApiKey), keyEquivalent: "")
-        configureUpstreamKey.target = self
+        let configureUpstreamKey = NSMenuItem(title: text("Configure Upstream Key", "\u{914D}\u{7F6E}\u{4E0A}\u{6E38} Key"), action: nil, keyEquivalent: "")
+        configureUpstreamKey.submenu = configureUpstreamKeyMenu()
         menu.addItem(configureUpstreamKey)
 
         let modelRoot = NSMenuItem(title: text("Model", "\u{6A21}\u{578B}"), action: nil, keyEquivalent: "")
@@ -300,6 +300,34 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         return keyMenu
     }
 
+    private func configureUpstreamKeyMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(actionItem(text("Add", "\u{6DFB}\u{52A0}"), #selector(addUpstreamApiKey)))
+        let providers = lastState["upstreamProviders"] as? [[String: Any]] ?? []
+        guard !providers.isEmpty else {
+            return menu
+        }
+
+        menu.addItem(NSMenuItem.separator())
+        for provider in providers {
+            let providerId = provider["id"] as? String ?? ""
+            let displayName = provider["displayName"] as? String ?? providerId
+            let root = NSMenuItem(title: displayName, action: nil, keyEquivalent: "")
+            let providerMenu = NSMenu()
+            providerMenu.addItem(disabledItem(providerId))
+            if let baseUrl = provider["baseUrl"] as? String {
+                providerMenu.addItem(disabledItem(baseUrl))
+            }
+            let update = NSMenuItem(title: text("Change", "\u{66F4}\u{6539}"), action: #selector(updateUpstreamApiKey(_:)), keyEquivalent: "")
+            update.target = self
+            update.representedObject = provider
+            providerMenu.addItem(update)
+            root.submenu = providerMenu
+            menu.addItem(root)
+        }
+        return menu
+    }
+
     private func localKeyMenu(key: String, assignedModel: String?) -> NSMenu {
         let menu = NSMenu()
         let copy = NSMenuItem(title: showKeys ? text("Copy \(key)", "\u{590D}\u{5236} \(key)") : text("Copy \(mask(key))", "\u{590D}\u{5236} \(mask(key))"), action: #selector(copyKey(_:)), keyEquivalent: "")
@@ -323,6 +351,11 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         clear.representedObject = key
         clear.isEnabled = assignedModel != nil
         menu.addItem(clear)
+
+        let delete = NSMenuItem(title: text("Delete Key", "\u{5220}\u{9664} Key"), action: #selector(deleteLocalKey(_:)), keyEquivalent: "")
+        delete.target = self
+        delete.representedObject = key
+        menu.addItem(delete)
         return menu
     }
 
@@ -523,15 +556,40 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         refreshState()
     }
 
+    @objc private func deleteLocalKey(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        let alert = NSAlert()
+        alert.messageText = text("Delete local API key?", "\u{5220}\u{9664}\u{672C}\u{5730} API Key\u{FF1F}")
+        alert.informativeText = text("Products using this key will stop working until they switch to another LocalBrain key.", "\u{6B63}\u{5728}\u{4F7F}\u{7528}\u{8FD9}\u{4E2A} Key \u{7684}\u{4EA7}\u{54C1}\u{9700}\u{5207}\u{6362}\u{5230}\u{5176}\u{4ED6} LocalBrain Key\u{FF0C}\u{5426}\u{5219}\u{4F1A}\u{505C}\u{6B62}\u{5DE5}\u{4F5C}\u{3002}")
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: text("Delete", "\u{5220}\u{9664}"))
+        alert.addButton(withTitle: text("Cancel", "\u{53D6}\u{6D88}"))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        _ = postJSON(url: "http://127.0.0.1:8787/brain/admin/delete-key", body: [
+            "apiKey": key
+        ])
+        refreshState()
+    }
+
     @objc private func addUpstreamApiKey() {
+        showUpstreamApiKeyDialog(provider: nil)
+    }
+
+    @objc private func updateUpstreamApiKey(_ sender: NSMenuItem) {
+        guard let provider = sender.representedObject as? [String: Any] else { return }
+        showUpstreamApiKeyDialog(provider: provider)
+    }
+
+    private func showUpstreamApiKeyDialog(provider: [String: Any]?) {
         if !isHealthOK() {
             startServerIfNeeded()
         }
         NSApp.activate(ignoringOtherApps: true)
 
-        let name = NSTextField(string: "")
+        let providerId = provider?["id"] as? String
+        let name = NSTextField(string: provider?["displayName"] as? String ?? "")
         name.placeholderString = "Provider name"
-        let baseURL = NSTextField(string: "https://api.openai.com/v1")
+        let baseURL = NSTextField(string: provider?["baseUrl"] as? String ?? "https://api.openai.com/v1")
         baseURL.placeholderString = "Base URL"
         upstreamBaseURLField = baseURL
         let apiKey = NSSecureTextField(string: "")
@@ -564,7 +622,9 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         stack.setFrameSize(NSSize(width: 360, height: 150))
 
         let alert = NSAlert()
-        alert.messageText = text("Add upstream API key", "\u{6DFB}\u{52A0}\u{4E0A}\u{6E38} API Key")
+        alert.messageText = providerId == nil
+            ? text("Add upstream API key", "\u{6DFB}\u{52A0}\u{4E0A}\u{6E38} API Key")
+            : text("Change upstream API key", "\u{66F4}\u{6539}\u{4E0A}\u{6E38} API Key")
         alert.informativeText = text("LocalBrain will store this key locally and proxy compatible model calls through it.", "LocalBrain \u{4F1A}\u{5C06}\u{8FD9}\u{4E2A} Key \u{4FDD}\u{5B58}\u{5728}\u{672C}\u{5730}\u{FF0C}\u{5E76}\u{901A}\u{8FC7}\u{5B83}\u{4E2D}\u{8F6C}\u{6A21}\u{578B}\u{8BF7}\u{6C42}\u{3002}")
         alert.accessoryView = stack
         alert.addButton(withTitle: text("Add", "\u{6DFB}\u{52A0}"))
@@ -577,6 +637,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
             return
         }
         let response = postJSON(url: "http://127.0.0.1:8787/brain/admin/upstream-api-keys", body: [
+            "providerId": providerId ?? "",
             "displayName": name.stringValue,
             "baseUrl": baseURL.stringValue,
             "apiKey": apiKey.stringValue,

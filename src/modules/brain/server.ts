@@ -44,6 +44,10 @@ interface LocalApiKeyRouteRequest {
   clear?: boolean;
 }
 
+interface LocalApiKeyDeleteRequest {
+  apiKey?: string;
+}
+
 interface ProviderModelFilterRequest {
   providerId?: string;
   enabled?: boolean;
@@ -146,6 +150,17 @@ export class BrainServer {
       this.writeJson(response, 200, {
         ok: true,
         key,
+        state: await this.localState(),
+      });
+      await this.audit(method, path, 200, startedAt);
+      return;
+    }
+
+    if (method === 'POST' && path === '/brain/admin/delete-key') {
+      const body = await this.readJson<LocalApiKeyDeleteRequest>(request);
+      await this.deleteLocalApiKey(body);
+      this.writeJson(response, 200, {
+        ok: true,
         state: await this.localState(),
       });
       await this.audit(method, path, 200, startedAt);
@@ -424,6 +439,34 @@ export class BrainServer {
 
     await atomicWriteJson(this.options.configPath, this.options.config);
     return key;
+  }
+
+  private async deleteLocalApiKey(body: LocalApiKeyDeleteRequest): Promise<void> {
+    if (!this.options.configPath) {
+      throw new Error('cannot persist deleted key because server was started without configPath');
+    }
+
+    const apiKey = body.apiKey?.trim();
+    if (!apiKey || !this.serverConfig.apiKeys.includes(apiKey)) {
+      throw new Error('apiKey must be an existing local API key');
+    }
+
+    const nextKeys = this.serverConfig.apiKeys.filter((key) => key !== apiKey);
+    if (this.serverConfig.requireAuth && nextKeys.length === 0 && !process.env.BRAIN_API_KEY) {
+      throw new Error('cannot delete the last local API key while auth is required');
+    }
+
+    const nextRoutes = { ...(this.serverConfig.apiKeyRoutes ?? {}) };
+    delete nextRoutes[apiKey];
+    this.serverConfig.apiKeys = nextKeys;
+    this.serverConfig.apiKeyRoutes = nextRoutes;
+    this.options.config.server = {
+      ...this.serverConfig,
+      apiKeys: nextKeys,
+      apiKeyRoutes: nextRoutes,
+    };
+
+    await atomicWriteJson(this.options.configPath, this.options.config);
   }
 
   private async setLocalApiKeyRoute(body: LocalApiKeyRouteRequest): Promise<void> {
@@ -882,7 +925,7 @@ function renderConsoleHtml(): string {
     ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
     .key { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; }
     .key-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px; display: grid; gap: 10px; }
-    .key-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 10px; align-items: center; }
+    .key-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto auto; gap: 10px; align-items: center; }
     .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 1px solid var(--line); border-radius: 6px; padding: 10px; color: var(--muted); }
     .meta { display: grid; gap: 8px; color: var(--muted); font-size: 14px; }
     .notice { color: var(--muted); font-size: 13px; }
@@ -1021,6 +1064,7 @@ function renderConsoleHtml(): string {
         assignedModel: 'Assigned model',
         assign: 'Assign',
         clear: 'Clear',
+        deleteKey: 'Delete Key',
         noUpstreamProviders: 'No upstream API key providers yet.',
         storedKey: 'stored key',
         envKey: 'env key',
@@ -1034,7 +1078,8 @@ function renderConsoleHtml(): string {
         modelFetchFailed: 'Failed to fetch upstream models',
         updateKeyFailed: 'Failed to update key model',
         updateSourceFailed: 'Failed to update model source',
-        addUpstreamFailed: 'Failed to add upstream key'
+        addUpstreamFailed: 'Failed to add upstream key',
+        deleteKeyFailed: 'Failed to delete local key',
       },
       zh: {
         subtitle: '本地 OpenAI-compatible 大脑网关',
@@ -1072,6 +1117,7 @@ function renderConsoleHtml(): string {
         assignedModel: '指定模型',
         assign: '指定',
         clear: '清除',
+        deleteKey: '删除 Key',
         noUpstreamProviders: '还没有上游 API Key provider。',
         storedKey: '已存储 Key',
         envKey: '环境变量 Key',
@@ -1085,7 +1131,8 @@ function renderConsoleHtml(): string {
         modelFetchFailed: '拉取上游模型失败',
         updateKeyFailed: '更新 Key 模型失败',
         updateSourceFailed: '更新模型来源失败',
-        addUpstreamFailed: '添加上游 Key 失败'
+        addUpstreamFailed: '添加上游 Key 失败',
+        deleteKeyFailed: '删除本地 Key 失败'
       }
     };
     const t = (key) => copy[language]?.[key] || copy.en[key] || key;
@@ -1139,7 +1186,7 @@ function renderConsoleHtml(): string {
         return '<li class="key-card"><div class="mono">' + (visible ? escapeHtml(key) : mask(key)) + '</div>' +
           '<div class="model-meta">' + t('assignedModel') + ': ' + assigned + '</div>' +
           '<div class="key-actions"><select data-key-model="' + index + '">' + options(route.model) + '</select>' +
-          '<button data-key-save="' + index + '">' + t('assign') + '</button><button data-key-clear="' + index + '">' + t('clear') + '</button><button data-key="' + index + '">' + t('copy') + '</button></div></li>';
+          '<button data-key-save="' + index + '">' + t('assign') + '</button><button data-key-clear="' + index + '">' + t('clear') + '</button><button data-key-delete="' + index + '">' + t('deleteKey') + '</button><button data-key="' + index + '">' + t('copy') + '</button></div></li>';
       }).join('');
       document.querySelectorAll('[data-key]').forEach((button) => {
         button.addEventListener('click', () => navigator.clipboard.writeText(keys[Number(button.dataset.key)]));
@@ -1153,6 +1200,9 @@ function renderConsoleHtml(): string {
       });
       document.querySelectorAll('[data-key-clear]').forEach((button) => {
         button.addEventListener('click', () => setKeyModel(keys[Number(button.dataset.keyClear)], '', true).catch((error) => alert(error.message)));
+      });
+      document.querySelectorAll('[data-key-delete]').forEach((button) => {
+        button.addEventListener('click', () => deleteLocalKey(keys[Number(button.dataset.keyDelete)]).catch((error) => alert(error.message)));
       });
     }
     function renderUpstreamProviders() {
@@ -1288,6 +1338,17 @@ function renderConsoleHtml(): string {
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body?.error?.message || t('updateKeyFailed'));
+      state = body.state;
+      renderKeys();
+    }
+    async function deleteLocalKey(apiKey) {
+      const res = await fetch('/brain/admin/delete-key', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ apiKey })
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body?.error?.message || t('deleteKeyFailed'));
       state = body.state;
       renderKeys();
     }
