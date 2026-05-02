@@ -15,6 +15,8 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
     private var lastState: [String: Any] = [:]
     private var timer: Timer?
     private weak var upstreamApiKeyField: NSSecureTextField?
+    private weak var upstreamBaseURLField: NSTextField?
+    private weak var upstreamModelPopup: NSPopUpButton?
     private lazy var projectRoot: URL = prepareProjectRoot()
     private var language: AppLanguage {
         get {
@@ -148,6 +150,10 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         let configureOpenCode = NSMenuItem(title: text("Configure OpenCode", "\u{914D}\u{7F6E} OpenCode"), action: #selector(configureOpenCode), keyEquivalent: "")
         configureOpenCode.target = self
         menu.addItem(configureOpenCode)
+
+        let configureUpstreamKey = NSMenuItem(title: text("Configure Upstream Key", "\u{914D}\u{7F6E}\u{4E0A}\u{6E38} Key"), action: #selector(addUpstreamApiKey), keyEquivalent: "")
+        configureUpstreamKey.target = self
+        menu.addItem(configureUpstreamKey)
 
         let modelRoot = NSMenuItem(title: text("Model", "\u{6A21}\u{578B}"), action: nil, keyEquivalent: "")
         modelRoot.submenu = modelMenu()
@@ -291,8 +297,6 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         keyMenu.addItem(actionItem(showKeys ? text("Hide Keys", "\u{9690}\u{85CF} Key") : text("Show Keys", "\u{663E}\u{793A} Key"), #selector(toggleKeys)))
         keyMenu.addItem(actionItem(text("Generate New Key", "\u{751F}\u{6210}\u{65B0} Key"), #selector(generateKey)))
         keyMenu.addItem(actionItem(text("Replace With New Key", "\u{66FF}\u{6362}\u{4E3A}\u{65B0} Key"), #selector(replaceKey)))
-        keyMenu.addItem(NSMenuItem.separator())
-        keyMenu.addItem(actionItem(text("Add Upstream API Key", "\u{6DFB}\u{52A0}\u{4E0A}\u{6E38} API Key"), #selector(addUpstreamApiKey)))
         return keyMenu
     }
 
@@ -529,6 +533,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         name.placeholderString = "Provider name"
         let baseURL = NSTextField(string: "https://api.openai.com/v1")
         baseURL.placeholderString = "Base URL"
+        upstreamBaseURLField = baseURL
         let apiKey = NSSecureTextField(string: "")
         apiKey.placeholderString = "API key"
         upstreamApiKeyField = apiKey
@@ -539,11 +544,20 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         apiKeyRow.spacing = 8
         apiKey.setContentHuggingPriority(.defaultLow, for: .horizontal)
         pasteApiKey.setContentHuggingPriority(.required, for: .horizontal)
-        let model = NSTextField(string: "")
-        model.placeholderString = "Optional default model"
+        let model = NSPopUpButton()
+        model.addItem(withTitle: text("Fetch models first (optional)", "\u{5148}\u{62C9}\u{53D6}\u{6A21}\u{578B}\u{FF08}\u{53EF}\u{9009}\u{FF09}"))
+        model.lastItem?.representedObject = ""
+        upstreamModelPopup = model
+        let fetchModels = NSButton(title: text("Fetch Models", "\u{62C9}\u{53D6}\u{6A21}\u{578B}"), target: self, action: #selector(fetchUpstreamModelsForDialog))
+        fetchModels.bezelStyle = .rounded
+        let modelRow = NSStackView(views: [model, fetchModels])
+        modelRow.orientation = .horizontal
+        modelRow.spacing = 8
+        model.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        fetchModels.setContentHuggingPriority(.required, for: .horizontal)
         let makeDefault = NSButton(checkboxWithTitle: text("Use as default when model is available", "\u{6A21}\u{578B}\u{53EF}\u{7528}\u{65F6}\u{8BBE}\u{4E3A}\u{9ED8}\u{8BA4}"), target: nil, action: nil)
 
-        let stack = NSStackView(views: [name, baseURL, apiKeyRow, model, makeDefault])
+        let stack = NSStackView(views: [name, baseURL, apiKeyRow, modelRow, makeDefault])
         stack.orientation = .vertical
         stack.spacing = 8
         stack.edgeInsets = NSEdgeInsets(top: 4, left: 0, bottom: 0, right: 0)
@@ -558,19 +572,23 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
 
         guard alert.runModal() == .alertFirstButtonReturn else {
             upstreamApiKeyField = nil
+            upstreamBaseURLField = nil
+            upstreamModelPopup = nil
             return
         }
         let response = postJSON(url: "http://127.0.0.1:8787/brain/admin/upstream-api-keys", body: [
             "displayName": name.stringValue,
             "baseUrl": baseURL.stringValue,
             "apiKey": apiKey.stringValue,
-            "model": model.stringValue,
+            "model": model.selectedItem?.representedObject as? String ?? "",
             "makeDefault": makeDefault.state == .on
         ])
         if response == nil {
             showAlert(title: text("API key was not added", "\u{672A}\u{6DFB}\u{52A0} API Key"), message: text("LocalBrain did not accept the upstream key. Check the service log for details.", "LocalBrain \u{672A}\u{63A5}\u{53D7}\u{8FD9}\u{4E2A}\u{4E0A}\u{6E38} Key\u{3002}\u{8BF7}\u{67E5}\u{770B}\u{670D}\u{52A1}\u{65E5}\u{5FD7}\u{3002}"))
         }
         upstreamApiKeyField = nil
+        upstreamBaseURLField = nil
+        upstreamModelPopup = nil
         refreshState()
     }
 
@@ -578,6 +596,29 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         guard let value = NSPasteboard.general.string(forType: .string),
               !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         upstreamApiKeyField?.stringValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @objc private func fetchUpstreamModelsForDialog() {
+        guard let baseURL = upstreamBaseURLField?.stringValue,
+              let apiKey = upstreamApiKeyField?.stringValue,
+              let popup = upstreamModelPopup else { return }
+
+        guard let response = postJSON(url: "http://127.0.0.1:8787/brain/admin/upstream-models", body: [
+            "baseUrl": baseURL,
+            "apiKey": apiKey
+        ]),
+              let models = response["models"] as? [String] else {
+            showAlert(title: text("Models were not fetched", "\u{672A}\u{62C9}\u{53D6}\u{6A21}\u{578B}"), message: text("Check the base URL and API key, then try again.", "\u{8BF7}\u{68C0}\u{67E5} Base URL \u{548C} API Key\u{FF0C}\u{7136}\u{540E}\u{91CD}\u{8BD5}\u{3002}"))
+            return
+        }
+
+        popup.removeAllItems()
+        popup.addItem(withTitle: text("Do not set default model", "\u{4E0D}\u{8BBE}\u{7F6E}\u{9ED8}\u{8BA4}\u{6A21}\u{578B}"))
+        popup.lastItem?.representedObject = ""
+        for model in models {
+            popup.addItem(withTitle: model)
+            popup.lastItem?.representedObject = model
+        }
     }
 
     @objc private func restartServer() {
@@ -668,7 +709,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
             result = json
         }.resume()
-        _ = sema.wait(timeout: .now() + 3.0)
+        _ = sema.wait(timeout: .now() + 10.0)
         return result
     }
 

@@ -32,6 +32,11 @@ interface UpstreamApiKeyRequest {
   makeDefault?: boolean;
 }
 
+interface UpstreamModelsRequest {
+  baseUrl?: string;
+  apiKey?: string;
+}
+
 interface LocalApiKeyRouteRequest {
   apiKey?: string;
   providerId?: string;
@@ -187,6 +192,17 @@ export class BrainServer {
         ok: true,
         ...result,
         state: await this.localState(),
+      });
+      await this.audit(method, path, 200, startedAt);
+      return;
+    }
+
+    if (method === 'POST' && path === '/brain/admin/upstream-models') {
+      const body = await this.readJson<UpstreamModelsRequest>(request);
+      const models = await fetchOpenAICompatibleModelIds(body.baseUrl, body.apiKey);
+      this.writeJson(response, 200, {
+        ok: true,
+        models,
       });
       await this.audit(method, path, 200, startedAt);
       return;
@@ -787,6 +803,31 @@ function addUnique(values: string[], value: string): string[] {
   return values.includes(value) ? values : [...values, value];
 }
 
+async function fetchOpenAICompatibleModelIds(baseUrl: string | undefined, apiKey: string | undefined): Promise<string[]> {
+  const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
+  const token = apiKey?.trim();
+  if (!token) {
+    throw new Error('apiKey is required');
+  }
+
+  const response = await fetch(`${normalizedBaseUrl}/models`, {
+    method: 'GET',
+    headers: {
+      authorization: `Bearer ${token}`,
+    },
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`upstream model discovery failed: ${response.status} ${text}`);
+  }
+
+  const payload = await response.json() as { data?: Array<{ id?: string }> };
+  return (payload.data ?? [])
+    .map((model) => model.id)
+    .filter((id): id is string => typeof id === 'string' && id.length > 0)
+    .sort((left, right) => left.localeCompare(right));
+}
+
 function renderConsoleHtml(): string {
   return `<!doctype html>
 <html lang="zh-CN">
@@ -868,69 +909,71 @@ function renderConsoleHtml(): string {
     <header>
       <div>
         <h1>LocalBrain</h1>
-        <p>Local OpenAI-compatible brain gateway</p>
+        <p data-i18n="subtitle">Local OpenAI-compatible brain gateway</p>
       </div>
       <div class="status"><span class="dot"></span><span id="status">Loading</span></div>
     </header>
     <div class="grid">
       <section>
-        <h2>Connection</h2>
+        <h2 data-i18n="connection">Connection</h2>
         <label class="notice">OPENAI_BASE_URL</label>
         <div class="row">
           <input id="baseUrl" readonly>
-          <button data-copy="baseUrl">Copy</button>
+          <button data-copy="baseUrl" data-i18n="copy">Copy</button>
         </div>
-        <label class="notice">Default model</label>
+        <label class="notice" data-i18n="defaultModel">Default model</label>
         <div class="row">
           <input id="model" readonly>
-          <button data-copy="model">Copy</button>
+          <button data-copy="model" data-i18n="copy">Copy</button>
         </div>
       </section>
       <section>
-        <h2>Service</h2>
+        <h2 data-i18n="service">Service</h2>
         <div class="meta">
-          <div>Config file: <span id="configPath"></span></div>
-          <div>Audit log: <span id="auditLogPath"></span></div>
-          <div>Provider：<span id="providers"></span></div>
+          <div><span data-i18n="configFile">Config file</span>: <span id="configPath"></span></div>
+          <div><span data-i18n="auditLog">Audit log</span>: <span id="auditLogPath"></span></div>
+          <div><span data-i18n="provider">Provider</span>: <span id="providers"></span></div>
+          <div><span data-i18n="language">Language</span>: <button id="toggleLanguage" data-i18n="toggleLanguage">中文</button></div>
         </div>
       </section>
       <section class="wide">
-        <h2>Local API Keys</h2>
+        <h2 data-i18n="localApiKeys">Local API Keys</h2>
         <ul id="keys"></ul>
         <div class="row">
-          <button class="primary" id="newKey">Generate New Key</button>
-          <button class="danger" id="replaceKey">Replace With New Key</button>
-          <button class="secondary" id="toggleKeys">Show/Hide</button>
+          <button class="primary" id="newKey" data-i18n="newKey">Generate New Key</button>
+          <button class="danger" id="replaceKey" data-i18n="replaceKey">Replace With New Key</button>
+          <button class="secondary" id="toggleKeys" data-i18n="showHide">Show/Hide</button>
         </div>
-        <p class="notice">These are local proxy keys, not Codex or OpenAI tokens. They are only used to access LocalBrain on 127.0.0.1.</p>
+        <p class="notice" data-i18n="localKeysNotice">These are local proxy keys, not Codex or OpenAI tokens. They are only used to access LocalBrain on 127.0.0.1.</p>
       </section>
       <section class="wide">
-        <h2>Upstream API Keys</h2>
+        <h2 data-i18n="upstreamApiKeys">Upstream API Keys</h2>
         <div class="stack">
           <div class="split">
-            <input id="upstreamName" placeholder="Provider name">
+            <input id="upstreamName" data-i18n-placeholder="providerName" placeholder="Provider name">
             <input id="upstreamBaseUrl" placeholder="https://api.openai.com/v1">
           </div>
           <div class="split">
-            <input id="upstreamKey" type="password" placeholder="API key">
-            <input id="upstreamModel" placeholder="Optional default model">
+            <input id="upstreamKey" type="password" data-i18n-placeholder="apiKey" placeholder="API key">
+            <button id="fetchUpstreamModels" data-i18n="fetchModels">Fetch Models</button>
           </div>
-          <label class="check"><input id="makeDefault" type="checkbox">Use as default when model is available</label>
+          <select id="upstreamModel"></select>
+          <label class="check"><input id="makeDefault" type="checkbox"><span data-i18n="useAsDefault">Use as default when model is available</span></label>
           <div class="row">
-            <button class="primary" id="addUpstreamKey">Add API Key Provider</button>
+            <button class="primary" id="addUpstreamKey" data-i18n="addApiKeyProvider">Add API Key Provider</button>
           </div>
           <ul id="upstreamProviders"></ul>
         </div>
-        <p class="notice">Stored upstream keys stay in the local config file. Clients still use the LocalBrain base URL and local proxy key.</p>
+        <p class="notice" data-i18n="upstreamNotice">Stored upstream keys stay in the local config file. Clients still use the LocalBrain base URL and local proxy key.</p>
       </section>
       <section class="wide">
-        <h2>Model Sources</h2>
+        <h2 data-i18n="modelSources">Model Sources</h2>
         <ul id="modelSources"></ul>
-        <p class="notice">Disable a source to keep LocalBrain from listing or using its models. Free-only keeps only models marked as free for that source.</p>
+        <p class="notice" data-i18n="modelSourcesNotice">Disable a source to keep LocalBrain from listing or using its models. Free-only keeps only models marked as free for that source.</p>
       </section>
       <section class="wide">
-        <h2>Models</h2>
-        <label class="check"><input id="freeOnly" type="checkbox">Only show free models</label>
+        <h2 data-i18n="models">Models</h2>
+        <label class="check"><input id="freeOnly" type="checkbox"><span data-i18n="onlyFreeModels">Only show free models</span></label>
         <ul id="models"></ul>
       </section>
     </div>
@@ -939,17 +982,135 @@ function renderConsoleHtml(): string {
     let visible = false;
     let state = null;
     let onlyFree = localStorage.getItem('localbrain.onlyFreeModels') === 'true';
+    let language = localStorage.getItem('localbrain.consoleLanguage') || ((navigator.language || '').toLowerCase().startsWith('zh') ? 'zh' : 'en');
     const $ = (id) => document.getElementById(id);
+    const copy = {
+      en: {
+        subtitle: 'Local OpenAI-compatible brain gateway',
+        connection: 'Connection',
+        copy: 'Copy',
+        defaultModel: 'Default model',
+        service: 'Service',
+        configFile: 'Config file',
+        auditLog: 'Audit log',
+        provider: 'Provider',
+        language: 'Language',
+        toggleLanguage: '中文',
+        localApiKeys: 'Local API Keys',
+        newKey: 'Generate New Key',
+        replaceKey: 'Replace With New Key',
+        showHide: 'Show/Hide',
+        localKeysNotice: 'These are local proxy keys, not Codex or OpenAI tokens. They are only used to access LocalBrain on 127.0.0.1.',
+        upstreamApiKeys: 'Upstream API Keys',
+        providerName: 'Provider name',
+        apiKey: 'API key',
+        fetchModels: 'Fetch Models',
+        selectFetchedModel: 'Fetch models, then choose one (optional)',
+        useAsDefault: 'Use as default when model is available',
+        addApiKeyProvider: 'Add API Key Provider',
+        upstreamNotice: 'Stored upstream keys stay in the local config file. Clients still use the LocalBrain base URL and local proxy key.',
+        modelSources: 'Model Sources',
+        modelSourcesNotice: 'Disable a source to keep LocalBrain from listing or using its models. Free-only keeps only models marked as free for that source.',
+        models: 'Models',
+        onlyFreeModels: 'Only show free models',
+        running: 'Running',
+        unavailable: 'Unavailable',
+        notProvided: 'not provided',
+        disabled: 'disabled',
+        defaultRouting: 'Default routing',
+        assignedModel: 'Assigned model',
+        assign: 'Assign',
+        clear: 'Clear',
+        noUpstreamProviders: 'No upstream API key providers yet.',
+        storedKey: 'stored key',
+        envKey: 'env key',
+        noModels: 'No models match the current filter.',
+        free: 'free',
+        paidUnknown: 'paid/unknown',
+        noSources: 'No model sources are registered.',
+        enabled: 'Enabled',
+        freeOnly: 'Free only',
+        useOnlyFree: 'Use only free',
+        modelFetchFailed: 'Failed to fetch upstream models',
+        updateKeyFailed: 'Failed to update key model',
+        updateSourceFailed: 'Failed to update model source',
+        addUpstreamFailed: 'Failed to add upstream key'
+      },
+      zh: {
+        subtitle: '本地 OpenAI-compatible 大脑网关',
+        connection: '连接',
+        copy: '复制',
+        defaultModel: '默认模型',
+        service: '服务',
+        configFile: '配置文件',
+        auditLog: '审计日志',
+        provider: 'Provider',
+        language: '语言',
+        toggleLanguage: 'English',
+        localApiKeys: '本地 API Key',
+        newKey: '生成新 Key',
+        replaceKey: '替换为新 Key',
+        showHide: '显示/隐藏',
+        localKeysNotice: '这些是 LocalBrain 本地代理 Key，不是 Codex 或 OpenAI token，只用于访问 127.0.0.1 上的 LocalBrain。',
+        upstreamApiKeys: '上游 API Key',
+        providerName: 'Provider 名称',
+        apiKey: 'API Key',
+        fetchModels: '拉取模型',
+        selectFetchedModel: '先拉取模型，再选择一个（可选）',
+        useAsDefault: '模型可用时设为默认',
+        addApiKeyProvider: '添加 API Key Provider',
+        upstreamNotice: '上游 Key 会保存在本地配置文件中；产品端仍然使用 LocalBrain 的 Base URL 和本地代理 Key。',
+        modelSources: '模型来源',
+        modelSourcesNotice: '关闭某个来源后，LocalBrain 不会列出或使用它的模型。Free only 只保留该来源中标记为免费的模型。',
+        models: '模型',
+        onlyFreeModels: '只显示免费模型',
+        running: '运行中',
+        unavailable: '不可用',
+        notProvided: '未提供',
+        disabled: '已禁用',
+        defaultRouting: '默认路由',
+        assignedModel: '指定模型',
+        assign: '指定',
+        clear: '清除',
+        noUpstreamProviders: '还没有上游 API Key provider。',
+        storedKey: '已存储 Key',
+        envKey: '环境变量 Key',
+        noModels: '没有符合当前过滤条件的模型。',
+        free: '免费',
+        paidUnknown: '付费/未知',
+        noSources: '没有注册模型来源。',
+        enabled: '启用',
+        freeOnly: '只用免费',
+        useOnlyFree: '只用免费',
+        modelFetchFailed: '拉取上游模型失败',
+        updateKeyFailed: '更新 Key 模型失败',
+        updateSourceFailed: '更新模型来源失败',
+        addUpstreamFailed: '添加上游 Key 失败'
+      }
+    };
+    const t = (key) => copy[language]?.[key] || copy.en[key] || key;
+    function applyLanguage() {
+      document.documentElement.lang = language === 'zh' ? 'zh-CN' : 'en';
+      document.querySelectorAll('[data-i18n]').forEach((node) => { node.textContent = t(node.dataset.i18n); });
+      document.querySelectorAll('[data-i18n-placeholder]').forEach((node) => { node.placeholder = t(node.dataset.i18nPlaceholder); });
+      resetUpstreamModelSelect();
+    }
+    function resetUpstreamModelSelect() {
+      const select = $('upstreamModel');
+      if (!select || select.options.length > 1) return;
+      select.innerHTML = '<option value="">' + t('selectFetchedModel') + '</option>';
+    }
     async function refresh() {
       const res = await fetch('/brain/local-state');
       state = await res.json();
-      $('status').textContent = state.ok ? 'Running' : 'Unavailable';
+      $('status').textContent = state.ok ? t('running') : t('unavailable');
       $('baseUrl').value = state.openAIBaseUrl || '';
       $('model').value = state.defaultModel || '';
-      $('configPath').textContent = state.configPath || 'not provided';
-      $('auditLogPath').textContent = state.auditLogPath || 'disabled';
+      $('configPath').textContent = state.configPath || t('notProvided');
+      $('auditLogPath').textContent = state.auditLogPath || t('disabled');
       $('providers').textContent = (state.providers || []).map((p) => p.id).join(', ');
       $('freeOnly').checked = onlyFree;
+      applyLanguage();
       renderKeys();
       renderUpstreamProviders();
       renderModelSources();
@@ -966,19 +1127,19 @@ function renderConsoleHtml(): string {
       const keys = state?.apiKeys || [];
       const details = state?.apiKeyDetails || keys.map((key) => ({ key, route: null }));
       const models = state?.availableModelDetails || [];
-      const options = (selected) => '<option value="">Default routing</option>' + models.map((model) => {
+      const options = (selected) => '<option value="">' + t('defaultRouting') + '</option>' + models.map((model) => {
         const value = escapeHtml(model.id);
-        const label = escapeHtml((model.displayName || model.id) + (model.providerId ? ' · ' + model.providerId : '') + (model.free === true ? ' · free' : ''));
+        const label = escapeHtml((model.displayName || model.id) + (model.providerId ? ' · ' + model.providerId : '') + (model.free === true ? ' · ' + t('free') : ''));
         return '<option value="' + value + '"' + (model.id === selected ? ' selected' : '') + '>' + label + '</option>';
       }).join('');
       $('keys').innerHTML = details.map((detail, index) => {
         const key = detail.key;
         const route = detail.route || {};
-        const assigned = route.model ? escapeHtml(route.model + (route.providerId ? ' · ' + route.providerId : '')) : 'Default routing';
+        const assigned = route.model ? escapeHtml(route.model + (route.providerId ? ' · ' + route.providerId : '')) : t('defaultRouting');
         return '<li class="key-card"><div class="mono">' + (visible ? escapeHtml(key) : mask(key)) + '</div>' +
-          '<div class="model-meta">Assigned model: ' + assigned + '</div>' +
+          '<div class="model-meta">' + t('assignedModel') + ': ' + assigned + '</div>' +
           '<div class="key-actions"><select data-key-model="' + index + '">' + options(route.model) + '</select>' +
-          '<button data-key-save="' + index + '">Assign</button><button data-key-clear="' + index + '">Clear</button><button data-key="' + index + '">Copy</button></div></li>';
+          '<button data-key-save="' + index + '">' + t('assign') + '</button><button data-key-clear="' + index + '">' + t('clear') + '</button><button data-key="' + index + '">' + t('copy') + '</button></div></li>';
       }).join('');
       document.querySelectorAll('[data-key]').forEach((button) => {
         button.addEventListener('click', () => navigator.clipboard.writeText(keys[Number(button.dataset.key)]));
@@ -997,32 +1158,32 @@ function renderConsoleHtml(): string {
     function renderUpstreamProviders() {
       const providers = state?.upstreamProviders || [];
       if (providers.length === 0) {
-        $('upstreamProviders').innerHTML = '<li class="notice">No upstream API key providers yet.</li>';
+        $('upstreamProviders').innerHTML = '<li class="notice">' + t('noUpstreamProviders') + '</li>';
         return;
       }
       $('upstreamProviders').innerHTML = providers.map((provider) => (
         '<li class="model-line"><div><div class="model-title">' + escapeHtml(provider.displayName || provider.id) + '</div>' +
         '<div class="model-meta">' + escapeHtml(provider.id) + ' · ' + escapeHtml(provider.baseUrl) + '</div></div>' +
-        '<span class="pill">' + (provider.hasStoredApiKey ? 'stored key' : escapeHtml(provider.apiKeyEnv || 'env key')) + '</span></li>'
+        '<span class="pill">' + (provider.hasStoredApiKey ? t('storedKey') : escapeHtml(provider.apiKeyEnv || t('envKey'))) + '</span></li>'
       )).join('');
     }
     function renderModels() {
       const models = (state?.availableModelDetails || []).filter((model) => !onlyFree || model.free === true);
       if (models.length === 0) {
-        $('models').innerHTML = '<li class="notice">No models match the current filter.</li>';
+        $('models').innerHTML = '<li class="notice">' + t('noModels') + '</li>';
         return;
       }
       $('models').innerHTML = models.map((model) => (
         '<li class="model-line"><div><div class="model-title">' + escapeHtml(model.displayName || model.id) + '</div>' +
         '<div class="model-meta">' + escapeHtml(model.id) + (model.providerId ? ' · ' + escapeHtml(model.providerId) : '') + '</div></div>' +
-        '<span class="pill">' + (model.free === true ? 'free' : 'paid/unknown') + '</span></li>'
+        '<span class="pill">' + (model.free === true ? t('free') : t('paidUnknown')) + '</span></li>'
       )).join('');
     }
     function renderModelSources() {
       const providers = state?.providers || [];
       const filters = state?.modelProviderFilters || {};
       if (providers.length === 0) {
-        $('modelSources').innerHTML = '<li class="notice">No model sources are registered.</li>';
+        $('modelSources').innerHTML = '<li class="notice">' + t('noSources') + '</li>';
         return;
       }
       $('modelSources').innerHTML = providers.map((provider, index) => {
@@ -1032,9 +1193,9 @@ function renderConsoleHtml(): string {
         return '<li class="model-line"><div><div class="model-title">' + escapeHtml(provider.displayName || provider.id) + '</div>' +
           '<div class="model-meta">' + escapeHtml(provider.id) + ' · ' + escapeHtml(provider.kind) + '</div></div>' +
           '<div class="source-actions">' +
-          '<label class="check"><input type="checkbox" data-source-enabled="' + index + '"' + (enabled ? ' checked' : '') + '>Enabled</label>' +
-          '<label class="check"><input type="checkbox" data-source-free="' + index + '"' + (freeOnly ? ' checked' : '') + '>Free only</label>' +
-          '<button data-source-only-free="' + index + '">Use only free</button>' +
+          '<label class="check"><input type="checkbox" data-source-enabled="' + index + '"' + (enabled ? ' checked' : '') + '>' + t('enabled') + '</label>' +
+          '<label class="check"><input type="checkbox" data-source-free="' + index + '"' + (freeOnly ? ' checked' : '') + '>' + t('freeOnly') + '</label>' +
+          '<button data-source-only-free="' + index + '">' + t('useOnlyFree') + '</button>' +
           '</div></li>';
       }).join('');
       document.querySelectorAll('[data-source-enabled]').forEach((input) => {
@@ -1083,12 +1244,28 @@ function renderConsoleHtml(): string {
         body: JSON.stringify(payload)
       });
       const body = await res.json();
-      if (!res.ok) throw new Error(body?.error?.message || 'Failed to add upstream key');
+      if (!res.ok) throw new Error(body?.error?.message || t('addUpstreamFailed'));
       state = body.state;
       $('upstreamKey').value = '';
+      resetUpstreamModelSelect();
       renderUpstreamProviders();
       renderModelSources();
       renderModels();
+    }
+    async function fetchUpstreamModels() {
+      const res = await fetch('/brain/admin/upstream-models', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          baseUrl: $('upstreamBaseUrl').value,
+          apiKey: $('upstreamKey').value
+        })
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body?.error?.message || t('modelFetchFailed'));
+      $('upstreamModel').innerHTML = '<option value="">' + t('selectFetchedModel') + '</option>' + (body.models || []).map((model) => (
+        '<option value="' + escapeHtml(model) + '">' + escapeHtml(model) + '</option>'
+      )).join('');
     }
     async function setProviderFilter(providerId, enabled, freeOnly, only) {
       const res = await fetch('/brain/admin/provider-model-filter', {
@@ -1097,7 +1274,7 @@ function renderConsoleHtml(): string {
         body: JSON.stringify({ providerId, enabled, freeOnly, only })
       });
       const body = await res.json();
-      if (!res.ok) throw new Error(body?.error?.message || 'Failed to update model source');
+      if (!res.ok) throw new Error(body?.error?.message || t('updateSourceFailed'));
       state = body.state;
       renderKeys();
       renderModelSources();
@@ -1110,7 +1287,7 @@ function renderConsoleHtml(): string {
         body: JSON.stringify({ apiKey, model, clear })
       });
       const body = await res.json();
-      if (!res.ok) throw new Error(body?.error?.message || 'Failed to update key model');
+      if (!res.ok) throw new Error(body?.error?.message || t('updateKeyFailed'));
       state = body.state;
       renderKeys();
     }
@@ -1121,11 +1298,24 @@ function renderConsoleHtml(): string {
     $('replaceKey').addEventListener('click', () => createKey(true));
     $('toggleKeys').addEventListener('click', () => { visible = !visible; renderKeys(); });
     $('addUpstreamKey').addEventListener('click', () => addUpstreamKey().catch((error) => alert(error.message)));
+    $('fetchUpstreamModels').addEventListener('click', () => fetchUpstreamModels().catch((error) => alert(error.message)));
+    $('toggleLanguage').addEventListener('click', () => {
+      language = language === 'zh' ? 'en' : 'zh';
+      localStorage.setItem('localbrain.consoleLanguage', language);
+      applyLanguage();
+      if (state) {
+        renderKeys();
+        renderUpstreamProviders();
+        renderModelSources();
+        renderModels();
+      }
+    });
     $('freeOnly').addEventListener('change', () => {
       onlyFree = $('freeOnly').checked;
       localStorage.setItem('localbrain.onlyFreeModels', String(onlyFree));
       renderModels();
     });
+    applyLanguage();
     refresh().catch((error) => {
       $('status').textContent = 'Error';
       console.error(error);
