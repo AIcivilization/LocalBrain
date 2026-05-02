@@ -14,6 +14,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
     private var showKeys = false
     private var lastState: [String: Any] = [:]
     private var timer: Timer?
+    private weak var upstreamApiKeyField: NSSecureTextField?
     private lazy var projectRoot: URL = prepareProjectRoot()
     private var language: AppLanguage {
         get {
@@ -522,6 +523,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         if !isHealthOK() {
             startServerIfNeeded()
         }
+        NSApp.activate(ignoringOtherApps: true)
 
         let name = NSTextField(string: "")
         name.placeholderString = "Provider name"
@@ -529,11 +531,19 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         baseURL.placeholderString = "Base URL"
         let apiKey = NSSecureTextField(string: "")
         apiKey.placeholderString = "API key"
+        upstreamApiKeyField = apiKey
+        let pasteApiKey = NSButton(title: text("Paste", "\u{7C98}\u{8D34}"), target: self, action: #selector(pasteUpstreamApiKeyFromClipboard))
+        pasteApiKey.bezelStyle = .rounded
+        let apiKeyRow = NSStackView(views: [apiKey, pasteApiKey])
+        apiKeyRow.orientation = .horizontal
+        apiKeyRow.spacing = 8
+        apiKey.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        pasteApiKey.setContentHuggingPriority(.required, for: .horizontal)
         let model = NSTextField(string: "")
         model.placeholderString = "Optional default model"
         let makeDefault = NSButton(checkboxWithTitle: text("Use as default when model is available", "\u{6A21}\u{578B}\u{53EF}\u{7528}\u{65F6}\u{8BBE}\u{4E3A}\u{9ED8}\u{8BA4}"), target: nil, action: nil)
 
-        let stack = NSStackView(views: [name, baseURL, apiKey, model, makeDefault])
+        let stack = NSStackView(views: [name, baseURL, apiKeyRow, model, makeDefault])
         stack.orientation = .vertical
         stack.spacing = 8
         stack.edgeInsets = NSEdgeInsets(top: 4, left: 0, bottom: 0, right: 0)
@@ -546,7 +556,10 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: text("Add", "\u{6DFB}\u{52A0}"))
         alert.addButton(withTitle: text("Cancel", "\u{53D6}\u{6D88}"))
 
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            upstreamApiKeyField = nil
+            return
+        }
         let response = postJSON(url: "http://127.0.0.1:8787/brain/admin/upstream-api-keys", body: [
             "displayName": name.stringValue,
             "baseUrl": baseURL.stringValue,
@@ -557,7 +570,14 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         if response == nil {
             showAlert(title: text("API key was not added", "\u{672A}\u{6DFB}\u{52A0} API Key"), message: text("LocalBrain did not accept the upstream key. Check the service log for details.", "LocalBrain \u{672A}\u{63A5}\u{53D7}\u{8FD9}\u{4E2A}\u{4E0A}\u{6E38} Key\u{3002}\u{8BF7}\u{67E5}\u{770B}\u{670D}\u{52A1}\u{65E5}\u{5FD7}\u{3002}"))
         }
+        upstreamApiKeyField = nil
         refreshState()
+    }
+
+    @objc private func pasteUpstreamApiKeyFromClipboard() {
+        guard let value = NSPasteboard.general.string(forType: .string),
+              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        upstreamApiKeyField?.stringValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     @objc private func restartServer() {
