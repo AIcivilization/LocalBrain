@@ -3,9 +3,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="$(/usr/bin/sed -n 's/.*"version": "\(.*\)".*/\1/p' "$ROOT/package.json" | /usr/bin/head -n 1)"
-STAMP="$(/bin/date +%Y%m%d-%H%M%S)"
-OUT="$ROOT/../LocalBrain-${VERSION}-${STAMP}.dmg"
+OUT="$ROOT/../LocalBrain-${VERSION}.dmg"
 STAGING="$(/usr/bin/mktemp -d /tmp/localbrain-dmg.XXXXXX)"
+
+/bin/rm -f "$OUT"
 
 /usr/bin/ditto "$ROOT/LocalBrain.app" "$STAGING/LocalBrain.app"
 /bin/ln -s /Applications "$STAGING/Applications"

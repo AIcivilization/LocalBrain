@@ -23,11 +23,16 @@ export class BrainModelRouter {
   }
 
   private providerForModel(model: string): string | undefined {
-    if (!model.startsWith('opencode/')) {
-      return undefined;
+    if (model.startsWith('opencode/')) {
+      return Object.entries(this.config.providers)
+        .find(([_providerId, provider]) => provider.type === 'opencode-local' && provider.disabled !== true)?.[0];
     }
 
-    return Object.entries(this.config.providers)
-      .find(([_providerId, provider]) => provider.type === 'opencode-local' && provider.disabled !== true)?.[0];
+    if (model.startsWith('deepseek-web/')) {
+      return Object.entries(this.config.providers)
+        .find(([_providerId, provider]) => provider.type === 'deepseek-web-local' && provider.disabled !== true)?.[0];
+    }
+
+    return undefined;
   }
 }

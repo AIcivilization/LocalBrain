@@ -28,6 +28,33 @@
       "localOnly": false,
       "experimental": true,
       "disabled": true
+    },
+    "antigravity-local": {
+      "type": "antigravity-local",
+      "displayName": "Antigravity Local Provider",
+      "localOnly": false,
+      "experimental": true,
+      "disabled": true,
+      "options": {
+        "stateDbPath": "/Users/wf/Library/Application Support/Antigravity/User/globalStorage/state.vscdb",
+        "sqlitePath": "sqlite3",
+        "imageOutputDir": "/Users/wf/LocalBrain/logs/antigravity-images",
+        "workspaceUri": "file:///Users/wf/LocalBrain",
+        "modelCacheTtlMs": 60000
+      }
+    },
+    "deepseek-web-local": {
+      "type": "deepseek-web-local",
+      "displayName": "DeepSeek Web Experimental Provider",
+      "baseUrl": "https://chat.deepseek.com",
+      "localOnly": true,
+      "experimental": true,
+      "disabled": true,
+      "options": {
+        "userTokenEnv": "DEEPSEEK_WEB_USER_TOKEN",
+        "wasmPath": "src/modules/brain/providers/deepseek_sha3_wasm_bg.7b9ca65ddd.wasm",
+        "modelCacheTtlMs": 60000
+      }
     }
   },
   "server": {

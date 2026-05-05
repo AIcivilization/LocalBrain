@@ -1,6 +1,6 @@
 {
   "name": "local-brain",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "type": "module",
   "description": "Local OpenAI-compatible brain gateway backed by local providers such as Codex ChatGPT login.",

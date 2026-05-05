@@ -17,6 +17,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
     private weak var upstreamApiKeyField: NSSecureTextField?
     private weak var upstreamBaseURLField: NSTextField?
     private weak var upstreamModelPopup: NSPopUpButton?
+    private weak var deepSeekWebTokenField: NSSecureTextField?
     private lazy var projectRoot: URL = prepareProjectRoot()
     private var language: AppLanguage {
         get {
@@ -96,6 +97,8 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         var state = fetchJSON(url: "http://127.0.0.1:8787/brain/local-state") ?? [:]
         state["codex"] = codexStatus()
         state["opencode"] = opencodeStatus(state: state)
+        state["antigravity"] = antigravityStatus(state: state)
+        state["deepseekWeb"] = deepSeekWebStatus(state: state)
         lastState = state
         updateStatusTitle()
         rebuildMenu()
@@ -105,9 +108,10 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         let serviceOK = (lastState["ok"] as? Bool) == true
         let codexOK = ((lastState["codex"] as? [String: Any])?["ok"] as? Bool) == true
         let opencodeOK = ((lastState["opencode"] as? [String: Any])?["ok"] as? Bool) == true
-        statusItem.button?.toolTip = serviceOK && codexOK && opencodeOK ? text("LocalBrain: running", "LocalBrain\u{FF1A}\u{8FD0}\u{884C}\u{4E2D}") : text("LocalBrain: attention needed", "LocalBrain\u{FF1A}\u{9700}\u{8981}\u{5904}\u{7406}")
+        let antigravityOK = ((lastState["antigravity"] as? [String: Any])?["ok"] as? Bool) == true
+        statusItem.button?.toolTip = serviceOK && codexOK && opencodeOK && antigravityOK ? text("LocalBrain: running", "LocalBrain\u{FF1A}\u{8FD0}\u{884C}\u{4E2D}") : text("LocalBrain: attention needed", "LocalBrain\u{FF1A}\u{9700}\u{8981}\u{5904}\u{7406}")
         if statusItem.button?.image == nil {
-            statusItem.button?.title = serviceOK && codexOK && opencodeOK ? "LB" : "LB!"
+            statusItem.button?.title = serviceOK && codexOK && opencodeOK && antigravityOK ? "LB" : "LB!"
         }
     }
 
@@ -137,10 +141,19 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         let codexOK = (codex["ok"] as? Bool) == true
         let opencode = lastState["opencode"] as? [String: Any] ?? [:]
         let opencodeOK = (opencode["ok"] as? Bool) == true
+        let antigravity = lastState["antigravity"] as? [String: Any] ?? [:]
+        let antigravityOK = (antigravity["ok"] as? Bool) == true
+        let deepseekWeb = lastState["deepseekWeb"] as? [String: Any] ?? [:]
+        let deepseekWebEnabled = (deepseekWeb["enabled"] as? Bool) == true
+        let deepseekWebOK = (deepseekWeb["ok"] as? Bool) == true
 
         menu.addItem(coloredItem(title: serviceOK ? text("● LocalBrain: running", "\u{25CF} LocalBrain\u{FF1A}\u{8FD0}\u{884C}\u{4E2D}") : text("● LocalBrain: not running", "\u{25CF} LocalBrain\u{FF1A}\u{672A}\u{8FD0}\u{884C}"), ok: serviceOK))
         menu.addItem(coloredItem(title: codexOK ? text("● Codex: ready", "\u{25CF} Codex\u{FF1A}\u{53EF}\u{7528}") : text("● Codex: setup needed", "\u{25CF} Codex\u{FF1A}\u{9700}\u{8981}\u{914D}\u{7F6E}"), ok: codexOK))
         menu.addItem(coloredItem(title: opencodeOK ? text("● OpenCode: ready", "\u{25CF} OpenCode\u{FF1A}\u{53EF}\u{7528}") : text("● OpenCode: setup needed", "\u{25CF} OpenCode\u{FF1A}\u{9700}\u{8981}\u{914D}\u{7F6E}"), ok: opencodeOK))
+        menu.addItem(coloredItem(title: antigravityOK ? text("● Antigravity: ready", "\u{25CF} Antigravity\u{FF1A}\u{53EF}\u{7528}") : text("● Antigravity: setup needed", "\u{25CF} Antigravity\u{FF1A}\u{9700}\u{8981}\u{914D}\u{7F6E}"), ok: antigravityOK))
+        if deepseekWebEnabled {
+            menu.addItem(coloredItem(title: deepseekWebOK ? text("● DeepSeek Web: ready", "\u{25CF} DeepSeek Web\u{FF1A}\u{53EF}\u{7528}") : text("● DeepSeek Web: unavailable", "\u{25CF} DeepSeek Web\u{FF1A}\u{4E0D}\u{53EF}\u{7528}"), ok: deepseekWebOK))
+        }
         addUpstreamStatusItems(to: menu)
         menu.addItem(NSMenuItem.separator())
 
@@ -162,10 +175,27 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         )
         menu.addItem(configureOpenCodeItem)
 
+        let configureAntigravityItem = NSMenuItem(title: providerRootTitle(text("Configure Antigravity", "\u{914D}\u{7F6E} Antigravity"), providerId: "antigravity-local"), action: nil, keyEquivalent: "")
+        configureAntigravityItem.state = providerFilterEnabled(providerId: "antigravity-local") ? .on : .off
+        configureAntigravityItem.submenu = providerConfigurationMenu(
+            providerId: "antigravity-local",
+            configureTitle: text("Check / Configure Antigravity", "\u{68C0}\u{67E5} / \u{914D}\u{7F6E} Antigravity"),
+            configureAction: #selector(configureAntigravity)
+        )
+        menu.addItem(configureAntigravityItem)
+
         let configureUpstreamKey = NSMenuItem(title: upstreamRootTitle(), action: nil, keyEquivalent: "")
         configureUpstreamKey.state = upstreamProvidersEnabled() ? .on : .off
         configureUpstreamKey.submenu = configureUpstreamKeyMenu()
         menu.addItem(configureUpstreamKey)
+
+        let configureDeepSeekWebItem = NSMenuItem(title: deepSeekRootTitle(), action: nil, keyEquivalent: "")
+        configureDeepSeekWebItem.state = deepseekWebEnabled ? .on : .off
+        let deepSeekMenu = NSMenu()
+        deepSeekMenu.addItem(actionItem(text("Set Token / Enable", "\u{8BBE}\u{7F6E} Token / \u{542F}\u{7528}"), #selector(configureDeepSeekWeb)))
+        deepSeekMenu.addItem(actionItem(text("Open DeepSeek Web", "\u{6253}\u{5F00} DeepSeek Web"), #selector(openDeepSeekWeb)))
+        configureDeepSeekWebItem.submenu = deepSeekMenu
+        menu.addItem(configureDeepSeekWebItem)
 
         let modelRoot = NSMenuItem(title: text("Model", "\u{6A21}\u{578B}"), action: nil, keyEquivalent: "")
         modelRoot.submenu = modelMenu()
@@ -450,6 +480,14 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         return "\(title) (\(status))"
     }
 
+    private func deepSeekRootTitle() -> String {
+        let title = text("Configure DeepSeek Web", "\u{914D}\u{7F6E} DeepSeek Web")
+        let status = ((lastState["deepseekWeb"] as? [String: Any])?["enabled"] as? Bool) == true
+            ? text("On", "\u{5F00}")
+            : text("Off", "\u{5173}")
+        return "\(title) (\(status))"
+    }
+
     private func upstreamProvidersEnabled() -> Bool {
         let providers = lastState["upstreamProviders"] as? [[String: Any]] ?? []
         guard !providers.isEmpty else { return false }
@@ -588,6 +626,87 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
             : "echo 'OpenCode CLI was not found. Install OpenCode first, then return to LocalBrain.'"
         runAppleScript("tell application \"Terminal\" to do script \(appleScriptString(command))")
         showAlert(title: text("Complete OpenCode setup", "\u{8BF7}\u{5B8C}\u{6210} OpenCode \u{914D}\u{7F6E}"), message: text("Terminal has been opened. Complete OpenCode login, then return to LocalBrain and refresh status.", "\u{5DF2}\u{6253}\u{5F00}\u{7EC8}\u{7AEF}\u{3002}\u{8BF7}\u{5B8C}\u{6210} OpenCode \u{767B}\u{5F55}\u{FF0C}\u{7136}\u{540E}\u{56DE}\u{5230} LocalBrain \u{5237}\u{65B0}\u{72B6}\u{6001}\u{3002}"))
+    }
+
+    @objc private func configureAntigravity() {
+        let status = antigravityStatus(state: lastState)
+        if (status["ok"] as? Bool) == true {
+            let count = status["modelCount"] as? Int ?? 0
+            showAlert(title: text("Antigravity is ready", "Antigravity \u{5DF2}\u{53EF}\u{7528}"), message: text("LocalBrain can discover \(count) Antigravity models.", "LocalBrain \u{5DF2}\u{53EF}\u{53D1}\u{73B0} \(count) \u{4E2A} Antigravity \u{6A21}\u{578B}\u{3002}"))
+            refreshState()
+            return
+        }
+
+        if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Antigravity") ?? NSWorkspace.shared.urlForApplication(toOpen: URL(fileURLWithPath: "/Applications/Antigravity.app")) {
+            NSWorkspace.shared.open(appURL)
+        } else {
+            NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/Antigravity.app"))
+        }
+        showAlert(title: text("Complete Antigravity setup", "\u{8BF7}\u{5B8C}\u{6210} Antigravity \u{914D}\u{7F6E}"), message: text("Antigravity has been opened. Sign in there, then return to LocalBrain and refresh status.", "\u{5DF2}\u{6253}\u{5F00} Antigravity\u{3002}\u{8BF7}\u{5728}\u{5176}\u{4E2D}\u{5B8C}\u{6210}\u{767B}\u{5F55}\u{FF0C}\u{7136}\u{540E}\u{56DE}\u{5230} LocalBrain \u{5237}\u{65B0}\u{72B6}\u{6001}\u{3002}"))
+    }
+
+    @objc private func configureDeepSeekWeb() {
+        if !isHealthOK() {
+            startServerIfNeeded()
+        }
+        NSApp.activate(ignoringOtherApps: true)
+
+        let status = lastState["deepseekWeb"] as? [String: Any] ?? [:]
+        let token = NSSecureTextField(string: "")
+        token.placeholderString = "DeepSeek userToken"
+        deepSeekWebTokenField = token
+        let paste = NSButton(title: text("Paste", "\u{7C98}\u{8D34}"), target: nil, action: nil)
+        paste.bezelStyle = .rounded
+        paste.target = self
+        paste.action = #selector(pasteDeepSeekToken(_:))
+        let tokenRow = NSStackView(views: [token, paste])
+        tokenRow.orientation = .horizontal
+        tokenRow.spacing = 8
+        token.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        paste.setContentHuggingPriority(.required, for: .horizontal)
+
+        let enabled = NSButton(checkboxWithTitle: text("Enable DeepSeek Web provider", "\u{542F}\u{7528} DeepSeek Web Provider"), target: nil, action: nil)
+        enabled.state = ((status["enabled"] as? Bool) == true) ? .on : .off
+
+        let stack = NSStackView(views: [tokenRow, enabled])
+        stack.orientation = .vertical
+        stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 4, left: 0, bottom: 0, right: 0)
+        stack.setFrameSize(NSSize(width: 380, height: 76))
+
+        let alert = NSAlert()
+        alert.messageText = text("Configure DeepSeek Web", "\u{914D}\u{7F6E} DeepSeek Web")
+        alert.informativeText = text(
+            "Leave token empty when enabling to auto-detect it from your local browser DeepSeek login. Paste only if auto-detect fails.",
+            "\u{542F}\u{7528}\u{65F6} token \u{7559}\u{7A7A}\u{FF0C}LocalBrain \u{4F1A}\u{81EA}\u{52A8}\u{4ECE}\u{672C}\u{673A}\u{6D4F}\u{89C8}\u{5668}\u{7684} DeepSeek \u{767B}\u{5F55}\u{7F13}\u{5B58}\u{91CC}\u{6293}\u{53D6}\u{3002}\u{81EA}\u{52A8}\u{5931}\u{8D25}\u{518D}\u{624B}\u{52A8}\u{7C98}\u{8D34}\u{3002}"
+        )
+        alert.accessoryView = stack
+        alert.addButton(withTitle: text("Save", "\u{4FDD}\u{5B58}"))
+        alert.addButton(withTitle: text("Cancel", "\u{53D6}\u{6D88}"))
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            deepSeekWebTokenField = nil
+            return
+        }
+
+        let response = postJSON(url: "http://127.0.0.1:8787/brain/admin/deepseek-web-provider", body: [
+            "enabled": enabled.state == .on,
+            "userToken": token.stringValue
+        ])
+        if response == nil {
+            showAlert(title: text("DeepSeek Web was not updated", "DeepSeek Web \u{672A}\u{66F4}\u{65B0}"), message: text("Check the token and try again from the web console if needed.", "\u{8BF7}\u{68C0}\u{67E5} token\u{FF0C}\u{5FC5}\u{8981}\u{65F6}\u{4ECE}\u{7F51}\u{9875}\u{63A7}\u{5236}\u{53F0}\u{91CD}\u{8BD5}\u{3002}"))
+        }
+        deepSeekWebTokenField = nil
+        refreshState()
+    }
+
+    @objc private func pasteDeepSeekToken(_ sender: NSButton) {
+        guard let value = NSPasteboard.general.string(forType: .string),
+              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        deepSeekWebTokenField?.stringValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @objc private func openDeepSeekWeb() {
+        NSWorkspace.shared.open(URL(string: "https://chat.deepseek.com/")!)
     }
 
     @objc private func openConsole() {
@@ -884,6 +1003,31 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
             "ok": findOpenCode() != nil && hasFreeModels,
             "hasCli": findOpenCode() != nil,
             "hasFreeModels": hasFreeModels
+        ]
+    }
+
+    private func antigravityStatus(state: [String: Any]) -> [String: Any] {
+        let modelDetails = state["availableModelDetails"] as? [[String: Any]] ?? []
+        let modelCount = modelDetails.filter { ($0["providerId"] as? String) == "antigravity-local" }.count
+        let appExists = FileManager.default.fileExists(atPath: "/Applications/Antigravity.app")
+        return [
+            "ok": appExists && modelCount > 0,
+            "hasApp": appExists,
+            "modelCount": modelCount
+        ]
+    }
+
+    private func deepSeekWebStatus(state: [String: Any]) -> [String: Any] {
+        let provider = state["deepSeekWebProvider"] as? [String: Any] ?? [:]
+        let enabled = (provider["disabled"] as? Bool) == false
+        let hasToken = (provider["hasStoredUserToken"] as? Bool) == true || provider["userTokenEnv"] is String
+        let modelDetails = state["availableModelDetails"] as? [[String: Any]] ?? []
+        let modelCount = modelDetails.filter { ($0["providerId"] as? String) == "deepseek-web-local" }.count
+        return [
+            "ok": enabled && hasToken && modelCount > 0,
+            "enabled": enabled,
+            "hasToken": hasToken,
+            "modelCount": modelCount
         ]
     }
 

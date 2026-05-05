@@ -2,8 +2,10 @@ import { readFile } from 'node:fs/promises';
 
 import { BrainRuntime } from './brain-runtime.ts';
 import { BrainProviderRegistry } from './provider-registry.ts';
+import { AntigravityLocalBrainProvider } from './providers/antigravity-local-provider.ts';
 import { CodexChatGptLocalProvider } from './providers/codex-chatgpt-local-provider.ts';
 import { CustomHttpBrainProvider } from './providers/custom-http-provider.ts';
+import { DeepSeekWebLocalProvider } from './providers/deepseek-web-local-provider.ts';
 import { ExperimentalSubscriptionBrainProvider } from './providers/experimental-subscription-provider.ts';
 import { MockBrainProvider } from './providers/mock-provider.ts';
 import { OpenAICompatibleBrainProvider } from './providers/openai-compatible-provider.ts';
@@ -21,6 +23,8 @@ const PROVIDER_KINDS: BrainProviderKind[] = [
   'vercel-ai-sdk',
   'custom-http',
   'opencode-local',
+  'antigravity-local',
+  'deepseek-web-local',
   'codex-chatgpt-local',
   'chatgpt-subscription-experimental',
 ];
@@ -206,6 +210,37 @@ export function registerConfiguredProvider(
       cliPath: typeof providerConfig.options?.cliPath === 'string' ? providerConfig.options.cliPath : undefined,
       modelProvider: typeof providerConfig.options?.modelProvider === 'string' ? providerConfig.options.modelProvider : undefined,
       passwordEnv: typeof providerConfig.options?.passwordEnv === 'string' ? providerConfig.options.passwordEnv : undefined,
+      experimental: providerConfig.experimental,
+    }));
+    return;
+  }
+
+  if (providerConfig.type === 'antigravity-local') {
+    registry.register(new AntigravityLocalBrainProvider({
+      id: providerId,
+      displayName: providerConfig.displayName,
+      stateDbPath: typeof providerConfig.options?.stateDbPath === 'string' ? providerConfig.options.stateDbPath : undefined,
+      sqlitePath: typeof providerConfig.options?.sqlitePath === 'string' ? providerConfig.options.sqlitePath : undefined,
+      httpsServerPort: typeof providerConfig.options?.httpsServerPort === 'number' ? providerConfig.options.httpsServerPort : undefined,
+      csrfToken: typeof providerConfig.options?.csrfToken === 'string' ? providerConfig.options.csrfToken : undefined,
+      imageOutputDir: typeof providerConfig.options?.imageOutputDir === 'string' ? providerConfig.options.imageOutputDir : undefined,
+      workspaceUri: typeof providerConfig.options?.workspaceUri === 'string' ? providerConfig.options.workspaceUri : undefined,
+      modelCacheTtlMs: typeof providerConfig.options?.modelCacheTtlMs === 'number' ? providerConfig.options.modelCacheTtlMs : undefined,
+      experimental: providerConfig.experimental,
+    }));
+    return;
+  }
+
+  if (providerConfig.type === 'deepseek-web-local') {
+    registry.register(new DeepSeekWebLocalProvider({
+      id: providerId,
+      displayName: providerConfig.displayName,
+      baseUrl: providerConfig.baseUrl,
+      userToken: typeof providerConfig.options?.userToken === 'string' ? providerConfig.options.userToken : undefined,
+      userTokenEnv: typeof providerConfig.options?.userTokenEnv === 'string' ? providerConfig.options.userTokenEnv : undefined,
+      userTokenPath: typeof providerConfig.options?.userTokenPath === 'string' ? providerConfig.options.userTokenPath : undefined,
+      wasmPath: typeof providerConfig.options?.wasmPath === 'string' ? providerConfig.options.wasmPath : undefined,
+      modelCacheTtlMs: typeof providerConfig.options?.modelCacheTtlMs === 'number' ? providerConfig.options.modelCacheTtlMs : undefined,
       experimental: providerConfig.experimental,
     }));
     return;

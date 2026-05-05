@@ -16,6 +16,8 @@ It runs on `127.0.0.1`, exposes OpenAI-style endpoints, and lets local apps use 
 - Default model selection from the menu bar
 - Codex ChatGPT local login provider for personal local testing
 - OpenCode local provider with dynamically discovered free model options
+- Antigravity local provider, including image generation through `/v1/images/generations`
+- DeepSeek Web experimental provider for local-only personal testing, disabled by default
 - Configurable provider boundary for future product integration
 
 ## macOS Install
@@ -31,6 +33,7 @@ The menu contains:
 - `Configure Codex`: checks whether local Codex ChatGPT login is available, and has an on/off switch for the Codex source
 - `Configure OpenCode`: opens OpenCode login/setup when the local OpenCode provider needs attention, and has an on/off switch for the OpenCode source
 - `Configure Upstream Key`: adds OpenAI-compatible upstream API keys, lists configured upstream providers, changes existing upstream keys, and has on/off switches for all upstream keys or one upstream provider
+- `Configure DeepSeek Web`: stores a local DeepSeek Web `userToken`, enables or disables the experimental DeepSeek Web source, and opens the DeepSeek web app
 - `Model`: selects the default model, including Codex models, discovered OpenCode models, and discovered OpenAI-compatible models when configured; it can filter the menu to free models only
 - `Model Sources`: enables or disables providers such as Codex and OpenCode, and can put a provider into free-only mode
 - `Key`: copies `OPENAI_BASE_URL`, copies local API keys, generates, rotates, deletes local keys, and can pin a key to a selected model
@@ -61,6 +64,8 @@ gpt-5.5-mini
 gpt-5.5
 opencode/gpt-5-nano
 opencode/*-free
+deepseek-web/default
+deepseek-web/expert
 ```
 
 ## HTTP API
@@ -131,6 +136,8 @@ Each local proxy key can also be assigned to a model from the console. When a ke
 
 Use `Model Sources`, or the switches under `Configure Codex`, `Configure OpenCode`, and `Configure Upstream Key`, to decide which providers LocalBrain is allowed to use. For example, turn off Codex and upstream keys, then choose OpenCode's `Use Only This Free Source` action when you want LocalBrain to expose and route only OpenCode models marked as free. Requests for disallowed models are moved to the first allowed model instead of escaping the filter.
 
+DeepSeek Web support is intentionally marked experimental and stays off until you enable it. To try it, open `https://chat.deepseek.com/` in a local browser and sign in once, then enable `DeepSeek Web Experimental` from the web console or `Configure DeepSeek Web` from the menu bar. If the token box is empty, LocalBrain attempts to auto-detect `userToken` from local browser storage. LocalBrain stores that token only in the local config and exposes free model IDs such as `deepseek-web/default`, `deepseek-web/expert`, and their search variants. If the web session expires, captcha appears, or DeepSeek changes its private web API, this provider may stop until you refresh the token or disable it again.
+
 List only free models through the OpenAI-compatible models endpoint:
 
 ```bash
@@ -181,6 +188,7 @@ LocalBrain is intended for local personal testing and development.
 - It asks OpenAI-compatible upstreams for their current `/models` list when an API key is configured.
 - It asks the OpenCode CLI for available free models when the OpenCode provider is configured.
 - It uses the OpenCode CLI directly for OpenCode requests, with local server mode kept as a fallback.
+- It can store a DeepSeek Web `userToken` locally only when the experimental DeepSeek Web provider is manually enabled.
 - Codex/ChatGPT subscription-backed behavior is for local testing, not for production redistribution.
 
 Production apps should depend on the LocalBrain protocol boundary or an approved provider, not on personal subscription login behavior.
@@ -223,6 +231,7 @@ macOS 使用方式：
 - `Configure Codex`：检查本机 Codex ChatGPT 登录态，并可用一级菜单中的开关单独停用/启用 Codex 来源
 - `Configure OpenCode`：检查或打开本机 OpenCode 配置，并可用一级菜单中的开关单独停用/启用 OpenCode 来源
 - `Configure Upstream Key` / `配置上游 Key`：添加 OpenAI-compatible 上游 API Key，查看已添加的厂家，更改已有上游 Key，并可整体或按厂家停用/启用上游 Key
+- `Configure DeepSeek Web` / `配置 DeepSeek Web`：粘贴 DeepSeek 网页 LocalStorage 里的 `userToken`，手动启用或关闭 DeepSeek Web 实验 Provider，也可打开 DeepSeek 网页
 - `Model`：选择默认模型，包含 Codex、OpenCode 和 OpenAI-compatible 上游模型，并可只显示免费模型
 - `Model Sources`：按 provider 控制模型来源，可关闭 Codex/OpenCode/上游 API，也可只允许某个来源的免费模型
 - `Key`：复制 `OPENAI_BASE_URL`、复制/生成/替换/删除本地 API Key，并给每个本地 Key 指定固定模型
@@ -232,5 +241,7 @@ macOS 使用方式：
 本地 Key 可以绑定到指定模型。产品侧只需要使用不同的 LocalBrain Key，LocalBrain 会自动把请求固定路由到对应模型；如果开启了 `Model Sources` 或一级配置菜单里的开关，请求会被限制在允许的模型范围内。例如只想用 OpenCode 免费模型时，关闭 Codex 和上游 Key，只保留 OpenCode，并对 OpenCode 选择“只用这个免费来源”。
 
 控制台支持中英文切换。添加上游 Key 时，先填写 Base URL 和 API Key，然后点击“拉取模型”，LocalBrain 会从上游 `/models` 接口获取模型列表供选择。
+
+DeepSeek Web Provider 只用于本机个人尝试，默认关闭。启用方式是先在本机浏览器登录 `https://chat.deepseek.com/`，然后在控制台的 `DeepSeek Web 实验 Provider` 或菜单栏的 `配置 DeepSeek Web` 里勾选启用；token 输入框留空时，LocalBrain 会自动从浏览器本地缓存里抓取 `userToken`。启用后会显示 `deepseek-web/default`、`deepseek-web/expert` 等免费模型；如果网页登录过期、出现人机验证，或 DeepSeek 改了网页私有接口，需要重新登录、重新启用或先关闭该来源。
 
 本项目适合本地个人测试。Codex/ChatGPT 本地订阅模式不建议用于正式产品发布。

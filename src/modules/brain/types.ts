@@ -15,6 +15,8 @@ export type BrainProviderKind =
   | 'vercel-ai-sdk'
   | 'custom-http'
   | 'opencode-local'
+  | 'antigravity-local'
+  | 'deepseek-web-local'
   | 'codex-chatgpt-local'
   | 'chatgpt-subscription-experimental';
 
@@ -68,11 +70,35 @@ export interface BrainProviderResponse {
   raw?: unknown;
 }
 
+export interface BrainImageGenerationRequest {
+  model: string;
+  prompt: string;
+  n?: number;
+  size?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface BrainImageGenerationResponse {
+  providerId: string;
+  model: string;
+  images: BrainGeneratedImage[];
+  raw?: unknown;
+}
+
+export interface BrainGeneratedImage {
+  path?: string;
+  url?: string;
+  b64Json?: string;
+  mimeType?: string;
+  revisedPrompt?: string;
+}
+
 export interface BrainProvider {
   id: string;
   kind: BrainProviderKind;
   describe(): BrainProviderDescriptor;
   generate(request: BrainProviderRequest): Promise<BrainProviderResponse>;
+  generateImage?(request: BrainImageGenerationRequest): Promise<BrainImageGenerationResponse>;
   listModels?(): Promise<BrainModelDescriptor[]>;
 }
 

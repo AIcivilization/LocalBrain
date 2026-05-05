@@ -1,9 +1,11 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
-import { appendFile, mkdir, rename, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 
 import { registerConfiguredProvider } from './config.ts';
+import { DeepSeekWebLocalProvider } from './providers/deepseek-web-local-provider.ts';
 import type { BrainConfig, BrainModelDescriptor, BrainProductRequest, BrainProviderConfig, BrainServerConfig } from './types.ts';
 import type { BrainRuntime } from './brain-runtime.ts';
 import type { BrainProviderRegistry } from './provider-registry.ts';
@@ -53,6 +55,21 @@ interface ProviderModelFilterRequest {
   enabled?: boolean;
   freeOnly?: boolean;
   only?: boolean;
+}
+
+interface DeepSeekWebProviderRequest {
+  enabled?: boolean;
+  userToken?: string;
+}
+
+interface OpenAIImageGenerationRequest {
+  model?: string;
+  prompt?: string;
+  n?: number;
+  size?: string;
+  response_format?: 'url' | 'b64_json';
+  user?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export class BrainServer {
@@ -223,6 +240,17 @@ export class BrainServer {
       return;
     }
 
+    if (method === 'POST' && path === '/brain/admin/deepseek-web-provider') {
+      const body = await this.readJson<DeepSeekWebProviderRequest>(request);
+      await this.setDeepSeekWebProvider(body);
+      this.writeJson(response, 200, {
+        ok: true,
+        state: await this.localState(),
+      });
+      await this.audit(method, path, 200, startedAt);
+      return;
+    }
+
     const localApiKey = this.authorizedApiKey(request);
     if (localApiKey === undefined) {
       this.writeError(response, 401, 'unauthorized', 'missing or invalid local brain API key');
@@ -258,6 +286,14 @@ export class BrainServer {
       }
       this.writeJson(response, 200, brainToOpenAIChatCompletion(result));
       await this.audit(method, path, 200, startedAt, result.providerId, result.model);
+      return;
+    }
+
+    if (method === 'POST' && path === '/v1/images/generations') {
+      const body = await this.readJson<OpenAIImageGenerationRequest>(request);
+      const result = await this.generateImage(body, localApiKey);
+      this.writeJson(response, 200, result);
+      await this.audit(method, path, 200, startedAt, result.brain.providerId, result.brain.model);
       return;
     }
 
@@ -398,6 +434,17 @@ export class BrainServer {
         hasStoredApiKey: Boolean(provider.apiKey),
         apiKeyEnv: provider.apiKeyEnv,
       }));
+    const deepSeekWebProvider = Object.entries(this.options.config.providers)
+      .filter(([_providerId, provider]) => provider.type === 'deepseek-web-local')
+      .map(([providerId, provider]) => ({
+        id: providerId,
+        type: provider.type,
+        displayName: provider.displayName ?? providerId,
+        baseUrl: provider.baseUrl ?? 'https://chat.deepseek.com',
+        disabled: provider.disabled === true,
+        hasStoredUserToken: typeof provider.options?.userToken === 'string' && provider.options.userToken.length > 0,
+        userTokenEnv: provider.options?.userTokenEnv,
+      }))[0];
     return {
       ok: true,
       service: 'LocalBrain',
@@ -411,6 +458,7 @@ export class BrainServer {
       providers: this.options.registry.list().map((provider) => provider.describe()),
       modelProviderFilters,
       upstreamProviders,
+      deepSeekWebProvider,
       requireAuth: this.serverConfig.requireAuth,
       apiKeys: this.serverConfig.apiKeys,
       apiKeyDetails,
@@ -608,6 +656,72 @@ export class BrainServer {
     };
   }
 
+  private async setDeepSeekWebProvider(body: DeepSeekWebProviderRequest): Promise<void> {
+    if (!this.options.configPath) {
+      throw new Error('cannot persist DeepSeek Web provider because server was started without configPath');
+    }
+
+    const providerId = 'deepseek-web-local';
+    const existing = this.options.config.providers[providerId];
+    const currentOptions = existing?.options ?? {};
+    const userToken = body.userToken?.trim();
+    const enabled = body.enabled === true;
+
+    const providerConfig: BrainProviderConfig = {
+      ...existing,
+      type: 'deepseek-web-local',
+      displayName: existing?.displayName ?? 'DeepSeek Web Experimental Provider',
+      baseUrl: existing?.baseUrl ?? 'https://chat.deepseek.com',
+      localOnly: true,
+      experimental: true,
+      disabled: !enabled,
+      options: {
+        ...currentOptions,
+        ...(userToken ? { userToken } : {}),
+        wasmPath: typeof currentOptions.wasmPath === 'string'
+          ? currentOptions.wasmPath
+          : 'src/modules/brain/providers/deepseek_sha3_wasm_bg.7b9ca65ddd.wasm',
+        modelCacheTtlMs: typeof currentOptions.modelCacheTtlMs === 'number'
+          ? currentOptions.modelCacheTtlMs
+          : 60_000,
+      },
+    };
+
+    if (enabled) {
+      const candidates = !userToken ? await discoverDeepSeekWebUserTokens() : [];
+      const discovered = uniqueTokenCandidates(candidates)[0]?.token;
+      if (discovered && typeof providerConfig.options?.userToken !== 'string') {
+        providerConfig.options = {
+          ...providerConfig.options,
+          userToken: discovered,
+        };
+      }
+    }
+
+    this.options.config.providers = {
+      ...this.options.config.providers,
+      [providerId]: providerConfig,
+    };
+
+    const currentFilters = { ...(this.serverConfig.modelProviderFilters ?? {}) };
+    currentFilters[providerId] = {
+      ...currentFilters[providerId],
+      enabled,
+      freeOnly: true,
+    };
+    this.serverConfig.modelProviderFilters = currentFilters;
+    this.options.config.server = {
+      ...this.serverConfig,
+      modelProviderFilters: currentFilters,
+    };
+
+    if (enabled) {
+      this.options.registry.registerOrReplace(deepSeekProviderFromConfig(providerId, providerConfig));
+    }
+
+    await atomicWriteJson(this.options.configPath, this.options.config);
+  }
+
   private async setDefaultModel(model?: string): Promise<void> {
     if (!model) {
       throw new Error('model is required');
@@ -757,6 +871,58 @@ export class BrainServer {
     };
   }
 
+  private async generateImage(body: OpenAIImageGenerationRequest, localApiKey: string): Promise<Record<string, unknown>> {
+    const prompt = body.prompt?.trim();
+    if (!prompt) {
+      throw new Error('prompt is required');
+    }
+
+    const routed = this.applyLocalApiKeyRoute({
+      input: prompt,
+      taskKind: 'image',
+      model: body.model,
+      metadata: body.metadata,
+    }, localApiKey);
+    const constrained = await this.constrainToAllowedModels(routed);
+    const providerId = constrained.providerId ?? this.options.config.defaultProvider;
+    const model = constrained.model ?? this.options.config.defaultModel;
+    const provider = this.options.registry.get(providerId);
+    if (!provider.generateImage) {
+      throw new Error(`provider ${providerId} does not support image generation`);
+    }
+
+    const imageResult = await provider.generateImage({
+      model,
+      prompt,
+      n: body.n,
+      size: body.size,
+      metadata: body.metadata,
+    });
+
+    return {
+      created: Math.floor(Date.now() / 1000),
+      data: await Promise.all(imageResult.images.map(async (image) => {
+        if (body.response_format === 'url') {
+          return {
+            url: image.url,
+            local_path: image.path,
+            revised_prompt: image.revisedPrompt ?? prompt,
+          };
+        }
+        return {
+          b64_json: image.b64Json ?? (image.path ? (await readFile(image.path)).toString('base64') : undefined),
+          url: image.url,
+          local_path: image.path,
+          revised_prompt: image.revisedPrompt ?? prompt,
+        };
+      })),
+      brain: {
+        providerId: imageResult.providerId,
+        model: imageResult.model,
+      },
+    };
+  }
+
   private isModelAllowedByProviderFilter(model: BrainModelDescriptor): boolean {
     const providerId = model.providerId ?? this.options.config.defaultProvider;
     const filter = this.serverConfig.modelProviderFilters?.[providerId];
@@ -846,6 +1012,20 @@ function addUnique(values: string[], value: string): string[] {
   return values.includes(value) ? values : [...values, value];
 }
 
+function deepSeekProviderFromConfig(providerId: string, providerConfig: BrainProviderConfig): DeepSeekWebLocalProvider {
+  return new DeepSeekWebLocalProvider({
+    id: providerId,
+    displayName: providerConfig.displayName,
+    baseUrl: providerConfig.baseUrl,
+    userToken: typeof providerConfig.options?.userToken === 'string' ? providerConfig.options.userToken : undefined,
+    userTokenEnv: typeof providerConfig.options?.userTokenEnv === 'string' ? providerConfig.options.userTokenEnv : undefined,
+    userTokenPath: typeof providerConfig.options?.userTokenPath === 'string' ? providerConfig.options.userTokenPath : undefined,
+    wasmPath: typeof providerConfig.options?.wasmPath === 'string' ? providerConfig.options.wasmPath : undefined,
+    modelCacheTtlMs: typeof providerConfig.options?.modelCacheTtlMs === 'number' ? providerConfig.options.modelCacheTtlMs : undefined,
+    experimental: providerConfig.experimental,
+  });
+}
+
 async function fetchOpenAICompatibleModelIds(baseUrl: string | undefined, apiKey: string | undefined): Promise<string[]> {
   const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
   const token = apiKey?.trim();
@@ -869,6 +1049,212 @@ async function fetchOpenAICompatibleModelIds(baseUrl: string | undefined, apiKey
     .map((model) => model.id)
     .filter((id): id is string => typeof id === 'string' && id.length > 0)
     .sort((left, right) => left.localeCompare(right));
+}
+
+interface DeepSeekWebTokenCandidate {
+  token: string;
+  source: string;
+  sourceMtimeMs: number;
+}
+
+async function discoverDeepSeekWebUserTokens(): Promise<DeepSeekWebTokenCandidate[]> {
+  const homes = browserLocalStorageRoots();
+  const candidates: DeepSeekWebTokenCandidate[] = [];
+  for (const root of homes) {
+    const files = await listLevelDbFiles(root).catch(() => []);
+    for (const file of files) {
+      const tokens = await extractDeepSeekTokensFromFile(file.path).catch(() => []);
+      candidates.push(...tokens.map((token) => ({
+        token,
+        source: file.path,
+        sourceMtimeMs: file.mtimeMs,
+      })));
+    }
+  }
+  for (const file of await listSafariLocalStorageFiles().catch(() => [])) {
+    const tokens = await extractDeepSeekTokensFromFile(file.path).catch(() => []);
+    candidates.push(...tokens.map((token) => ({
+      token,
+      source: file.path,
+      sourceMtimeMs: file.mtimeMs,
+    })));
+  }
+  return uniqueTokenCandidates(candidates)
+    .sort((left, right) => {
+      const scoreDiff = scoreDiscoveredToken(right.token) - scoreDiscoveredToken(left.token);
+      if (scoreDiff !== 0) {
+        return scoreDiff;
+      }
+      return right.sourceMtimeMs - left.sourceMtimeMs;
+    });
+}
+
+function browserLocalStorageRoots(): string[] {
+  const home = os.homedir();
+  return [
+    path.join(home, 'Library/Application Support/Google/Chrome'),
+    path.join(home, 'Library/Application Support/Google/Chrome Canary'),
+    path.join(home, 'Library/Application Support/Microsoft Edge'),
+    path.join(home, 'Library/Application Support/BraveSoftware/Brave-Browser'),
+    path.join(home, 'Library/Application Support/Chromium'),
+    path.join(home, 'Library/Application Support/Arc/User Data'),
+    path.join(home, 'Library/Application Support/Vivaldi'),
+    path.join(home, 'Library/Application Support/Opera Software/Opera Stable'),
+  ];
+}
+
+async function listSafariLocalStorageFiles(): Promise<Array<{ path: string; mtimeMs: number }>> {
+  const home = os.homedir();
+  const roots = [
+    path.join(home, 'Library/Safari/LocalStorage'),
+    path.join(home, 'Library/Containers/com.apple.Safari/Data/Library/WebKit/WebsiteData/Default'),
+  ];
+  const files: Array<{ path: string; mtimeMs: number }> = [];
+  for (const root of roots) {
+    await collectSafariLocalStorageFiles(root, files, 0).catch(() => undefined);
+  }
+  return files;
+}
+
+async function collectSafariLocalStorageFiles(
+  dir: string,
+  files: Array<{ path: string; mtimeMs: number }>,
+  depth: number,
+): Promise<void> {
+  if (depth > 5) {
+    return;
+  }
+  const entries = await readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const filePath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      await collectSafariLocalStorageFiles(filePath, files, depth + 1).catch(() => undefined);
+      continue;
+    }
+    if (!entry.isFile() || !/^localstorage\.sqlite3(?:-wal)?$/i.test(entry.name)) {
+      continue;
+    }
+    const info = await stat(filePath).catch(() => undefined);
+    if (info && info.size > 0 && info.size <= 64 * 1024 * 1024) {
+      files.push({
+        path: filePath,
+        mtimeMs: info.mtimeMs,
+      });
+    }
+  }
+}
+
+async function listLevelDbFiles(root: string): Promise<Array<{ path: string; mtimeMs: number }>> {
+  const entries = await readdir(root, { withFileTypes: true });
+  const files: Array<{ path: string; mtimeMs: number }> = [];
+  const profileDirs = entries
+    .filter((entry) => entry.isDirectory())
+    .filter((entry) => entry.name === 'Default' || entry.name.startsWith('Profile ') || entry.name === 'Guest Profile')
+    .flatMap((entry) => {
+      const profile = path.join(root, entry.name);
+      return [
+        path.join(profile, 'Local Storage', 'leveldb'),
+        path.join(profile, 'IndexedDB', 'https_chat.deepseek.com_0.indexeddb.leveldb'),
+        path.join(profile, 'IndexedDB', 'https_platform.deepseek.com_0.indexeddb.leveldb'),
+      ];
+    });
+
+  const operaStorage = path.join(root, 'Local Storage', 'leveldb');
+  profileDirs.push(operaStorage);
+
+  for (const dir of profileDirs) {
+    const levelEntries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+    for (const entry of levelEntries) {
+      if (!entry.isFile() || !/\.(ldb|log)$/i.test(entry.name)) {
+        continue;
+      }
+      const file = path.join(dir, entry.name);
+      const info = await stat(file).catch(() => undefined);
+      if (info && info.size > 0 && info.size <= 64 * 1024 * 1024) {
+        files.push({
+          path: file,
+          mtimeMs: info.mtimeMs,
+        });
+      }
+    }
+  }
+
+  return files;
+}
+
+async function extractDeepSeekTokensFromFile(file: string): Promise<string[]> {
+  const buffer = await readFile(file);
+  const texts = [
+    buffer.toString('utf8'),
+    buffer.toString('utf16le'),
+    buffer.toString('latin1'),
+  ];
+  const tokens = new Set<string>();
+
+  for (const text of texts) {
+    if (!text.includes('deepseek') && !text.includes('userToken')) {
+      continue;
+    }
+    for (const token of extractDeepSeekTokensFromText(text)) {
+      tokens.add(token);
+    }
+  }
+  return [...tokens];
+}
+
+function extractDeepSeekTokensFromText(text: string): string[] {
+  const candidates = new Set<string>();
+  const addMatches = (pattern: RegExp): void => {
+    for (const match of text.matchAll(pattern)) {
+      const candidate = sanitizeDiscoveredToken(match[1]);
+      if (candidate) {
+        candidates.add(candidate);
+      }
+    }
+  };
+
+  addMatches(/userToken[\s\S]{0,2048}?(eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})/g);
+  addMatches(/"userToken"\s*:\s*"([^"]{32,4096})"/g);
+  addMatches(/userToken[\s\S]{0,512}?["']([A-Za-z0-9._+/=-]{48,4096})["']/g);
+  addMatches(/userToken[\s\S]{0,512}?([A-Za-z0-9._+/=-]{48,4096})/g);
+
+  return [...candidates]
+    .filter((candidate) => !candidate.includes('deepseek.com'))
+    .filter((candidate) => !candidate.includes('Local Storage'))
+    .sort((left, right) => scoreDiscoveredToken(right) - scoreDiscoveredToken(left));
+}
+
+function uniqueTokenCandidates(candidates: DeepSeekWebTokenCandidate[]): DeepSeekWebTokenCandidate[] {
+  const byToken = new Map<string, DeepSeekWebTokenCandidate>();
+  for (const candidate of candidates) {
+    const current = byToken.get(candidate.token);
+    if (!current || candidate.sourceMtimeMs > current.sourceMtimeMs) {
+      byToken.set(candidate.token, candidate);
+    }
+  }
+  return [...byToken.values()];
+}
+
+function sanitizeDiscoveredToken(value: string | undefined): string | undefined {
+  const cleaned = value
+    ?.replace(/\u0000/g, '')
+    .trim()
+    .replace(/^Bearer\s+/i, '');
+  if (!cleaned || cleaned.length < 32 || cleaned.length > 4096) {
+    return undefined;
+  }
+  if (!/^[A-Za-z0-9._+/=-]+$/.test(cleaned)) {
+    return undefined;
+  }
+  return cleaned;
+}
+
+function scoreDiscoveredToken(value: string): number {
+  let score = value.length;
+  if (/^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value)) {
+    score += 10_000;
+  }
+  return score;
 }
 
 function renderConsoleHtml(): string {
@@ -1010,6 +1396,18 @@ function renderConsoleHtml(): string {
         <p class="notice" data-i18n="upstreamNotice">Stored upstream keys stay in the local config file. Clients still use the LocalBrain base URL and local proxy key.</p>
       </section>
       <section class="wide">
+        <h2 data-i18n="deepSeekWeb">DeepSeek Web Experimental</h2>
+        <div class="stack">
+          <label class="check"><input id="deepSeekWebEnabled" type="checkbox"><span data-i18n="enableDeepSeekWeb">Enable DeepSeek Web provider</span></label>
+          <div class="split">
+            <input id="deepSeekWebToken" type="password" data-i18n-placeholder="deepSeekUserToken" placeholder="DeepSeek userToken">
+            <button class="primary" id="saveDeepSeekWeb" data-i18n="saveDeepSeekWeb">Save DeepSeek Web</button>
+          </div>
+          <div id="deepSeekWebStatus" class="model-meta"></div>
+        </div>
+        <p class="notice" data-i18n="deepSeekWebNotice">This experimental provider is local-only and off by default. Leave userToken empty when enabling to auto-detect it from local browser DeepSeek login.</p>
+      </section>
+      <section class="wide">
         <h2 data-i18n="modelSources">Model Sources</h2>
         <ul id="modelSources"></ul>
         <p class="notice" data-i18n="modelSourcesNotice">Disable a source to keep LocalBrain from listing or using its models. Free-only keeps only models marked as free for that source.</p>
@@ -1066,6 +1464,14 @@ function renderConsoleHtml(): string {
         clear: 'Clear',
         deleteKey: 'Delete Key',
         noUpstreamProviders: 'No upstream API key providers yet.',
+        deepSeekWeb: 'DeepSeek Web Experimental',
+        enableDeepSeekWeb: 'Enable DeepSeek Web provider',
+        deepSeekUserToken: 'DeepSeek userToken',
+        saveDeepSeekWeb: 'Save DeepSeek Web',
+        deepSeekWebNotice: 'This experimental provider is local-only and off by default. Leave userToken empty when enabling to auto-detect it from local browser DeepSeek login.',
+        deepSeekStored: 'DeepSeek Web token is stored locally.',
+        deepSeekMissing: 'DeepSeek Web token is not configured.',
+        updateDeepSeekFailed: 'Failed to update DeepSeek Web provider',
         storedKey: 'stored key',
         envKey: 'env key',
         noModels: 'No models match the current filter.',
@@ -1119,6 +1525,14 @@ function renderConsoleHtml(): string {
         clear: '清除',
         deleteKey: '删除 Key',
         noUpstreamProviders: '还没有上游 API Key provider。',
+        deepSeekWeb: 'DeepSeek Web 实验 Provider',
+        enableDeepSeekWeb: '启用 DeepSeek Web Provider',
+        deepSeekUserToken: 'DeepSeek userToken',
+        saveDeepSeekWeb: '保存 DeepSeek Web',
+        deepSeekWebNotice: '这个实验 Provider 只用于本机，默认关闭。启用时 userToken 留空，会自动从本机浏览器的 DeepSeek 登录缓存里抓取。',
+        deepSeekStored: 'DeepSeek Web token 已保存在本地。',
+        deepSeekMissing: 'DeepSeek Web token 尚未配置。',
+        updateDeepSeekFailed: '更新 DeepSeek Web Provider 失败',
         storedKey: '已存储 Key',
         envKey: '环境变量 Key',
         noModels: '没有符合当前过滤条件的模型。',
@@ -1160,6 +1574,7 @@ function renderConsoleHtml(): string {
       applyLanguage();
       renderKeys();
       renderUpstreamProviders();
+      renderDeepSeekWeb();
       renderModelSources();
       renderModels();
     }
@@ -1216,6 +1631,11 @@ function renderConsoleHtml(): string {
         '<div class="model-meta">' + escapeHtml(provider.id) + ' · ' + escapeHtml(provider.baseUrl) + '</div></div>' +
         '<span class="pill">' + (provider.hasStoredApiKey ? t('storedKey') : escapeHtml(provider.apiKeyEnv || t('envKey'))) + '</span></li>'
       )).join('');
+    }
+    function renderDeepSeekWeb() {
+      const provider = state?.deepSeekWebProvider || {};
+      $('deepSeekWebEnabled').checked = provider.disabled === false;
+      $('deepSeekWebStatus').textContent = provider.hasStoredUserToken ? t('deepSeekStored') : t('deepSeekMissing');
     }
     function renderModels() {
       const models = (state?.availableModelDetails || []).filter((model) => !onlyFree || model.free === true);
@@ -1299,6 +1719,25 @@ function renderConsoleHtml(): string {
       $('upstreamKey').value = '';
       resetUpstreamModelSelect();
       renderUpstreamProviders();
+      renderDeepSeekWeb();
+      renderModelSources();
+      renderModels();
+    }
+    async function saveDeepSeekWeb() {
+      const res = await fetch('/brain/admin/deepseek-web-provider', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          enabled: $('deepSeekWebEnabled').checked,
+          userToken: $('deepSeekWebToken').value
+        })
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body?.error?.message || t('updateDeepSeekFailed'));
+      state = body.state;
+      $('deepSeekWebToken').value = '';
+      renderDeepSeekWeb();
+      renderKeys();
       renderModelSources();
       renderModels();
     }
@@ -1327,6 +1766,7 @@ function renderConsoleHtml(): string {
       if (!res.ok) throw new Error(body?.error?.message || t('updateSourceFailed'));
       state = body.state;
       renderKeys();
+      renderDeepSeekWeb();
       renderModelSources();
       renderModels();
     }
@@ -1360,6 +1800,7 @@ function renderConsoleHtml(): string {
     $('toggleKeys').addEventListener('click', () => { visible = !visible; renderKeys(); });
     $('addUpstreamKey').addEventListener('click', () => addUpstreamKey().catch((error) => alert(error.message)));
     $('fetchUpstreamModels').addEventListener('click', () => fetchUpstreamModels().catch((error) => alert(error.message)));
+    $('saveDeepSeekWeb').addEventListener('click', () => saveDeepSeekWeb().catch((error) => alert(error.message)));
     $('toggleLanguage').addEventListener('click', () => {
       language = language === 'zh' ? 'en' : 'zh';
       localStorage.setItem('localbrain.consoleLanguage', language);
@@ -1367,6 +1808,7 @@ function renderConsoleHtml(): string {
       if (state) {
         renderKeys();
         renderUpstreamProviders();
+        renderDeepSeekWeb();
         renderModelSources();
         renderModels();
       }
