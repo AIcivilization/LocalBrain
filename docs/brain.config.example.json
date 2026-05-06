@@ -42,19 +42,6 @@
         "workspaceUri": "file:///Users/wf/LocalBrain",
         "modelCacheTtlMs": 60000
       }
-    },
-    "deepseek-web-local": {
-      "type": "deepseek-web-local",
-      "displayName": "DeepSeek Web Experimental Provider",
-      "baseUrl": "https://chat.deepseek.com",
-      "localOnly": true,
-      "experimental": true,
-      "disabled": true,
-      "options": {
-        "userTokenEnv": "DEEPSEEK_WEB_USER_TOKEN",
-        "wasmPath": "src/modules/brain/providers/deepseek_sha3_wasm_bg.7b9ca65ddd.wasm",
-        "modelCacheTtlMs": 60000
-      }
     }
   },
   "server": {

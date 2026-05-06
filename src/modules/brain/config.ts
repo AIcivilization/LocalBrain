@@ -5,7 +5,6 @@ import { BrainProviderRegistry } from './provider-registry.ts';
 import { AntigravityLocalBrainProvider } from './providers/antigravity-local-provider.ts';
 import { CodexChatGptLocalProvider } from './providers/codex-chatgpt-local-provider.ts';
 import { CustomHttpBrainProvider } from './providers/custom-http-provider.ts';
-import { DeepSeekWebLocalProvider } from './providers/deepseek-web-local-provider.ts';
 import { ExperimentalSubscriptionBrainProvider } from './providers/experimental-subscription-provider.ts';
 import { MockBrainProvider } from './providers/mock-provider.ts';
 import { OpenAICompatibleBrainProvider } from './providers/openai-compatible-provider.ts';
@@ -232,17 +231,6 @@ export function registerConfiguredProvider(
   }
 
   if (providerConfig.type === 'deepseek-web-local') {
-    registry.register(new DeepSeekWebLocalProvider({
-      id: providerId,
-      displayName: providerConfig.displayName,
-      baseUrl: providerConfig.baseUrl,
-      userToken: typeof providerConfig.options?.userToken === 'string' ? providerConfig.options.userToken : undefined,
-      userTokenEnv: typeof providerConfig.options?.userTokenEnv === 'string' ? providerConfig.options.userTokenEnv : undefined,
-      userTokenPath: typeof providerConfig.options?.userTokenPath === 'string' ? providerConfig.options.userTokenPath : undefined,
-      wasmPath: typeof providerConfig.options?.wasmPath === 'string' ? providerConfig.options.wasmPath : undefined,
-      modelCacheTtlMs: typeof providerConfig.options?.modelCacheTtlMs === 'number' ? providerConfig.options.modelCacheTtlMs : undefined,
-      experimental: providerConfig.experimental,
-    }));
     return;
   }
 

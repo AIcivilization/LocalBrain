@@ -7,6 +7,36 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         case chinese = "zh-Hans"
     }
 
+    private enum ChannelHealthLevel: Equatable {
+        case error
+        case unstable
+        case unknown
+        case ok
+    }
+
+    private struct ChannelSummary {
+        let key: String
+        let label: String
+        let assignedModel: String?
+        let displayModel: String
+        let providerId: String?
+        let status: String
+        let durationMs: Int?
+        let tokensPerSecond: Double?
+        let successRate: Double?
+        let recentPerMinute: Int
+        let recentCount: Int
+        let lastTestAt: String?
+        let errorMessage: String?
+    }
+
+    private struct ModelInfo {
+        let id: String
+        let providerId: String?
+        let free: Bool
+        let displayName: String?
+    }
+
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private var menu = NSMenu()
     private var serverProcess: Process?
@@ -17,11 +47,12 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
     private weak var upstreamApiKeyField: NSSecureTextField?
     private weak var upstreamBaseURLField: NSTextField?
     private weak var upstreamModelPopup: NSPopUpButton?
-    private weak var deepSeekWebTokenField: NSSecureTextField?
     private lazy var projectRoot: URL = prepareProjectRoot()
     private var language: AppLanguage {
         get {
-            let raw = UserDefaults.standard.string(forKey: "LocalBrain.language") ?? AppLanguage.english.rawValue
+            let key = "LocalBrain.language"
+            let raw = UserDefaults.standard.string(forKey: key)
+                ?? (Locale.preferredLanguages.first?.lowercased().hasPrefix("zh") == true ? AppLanguage.chinese.rawValue : AppLanguage.english.rawValue)
             return AppLanguage(rawValue: raw) ?? .english
         }
         set {
@@ -36,7 +67,6 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
             UserDefaults.standard.set(newValue, forKey: "LocalBrain.showFreeModelsOnly")
         }
     }
-
     func applicationDidFinishLaunching(_ notification: Notification) {
         debugLog("applicationDidFinishLaunching projectRoot=\(projectRoot.path)")
         NSApp.setActivationPolicy(.accessory)
@@ -98,7 +128,6 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         state["codex"] = codexStatus()
         state["opencode"] = opencodeStatus(state: state)
         state["antigravity"] = antigravityStatus(state: state)
-        state["deepseekWeb"] = deepSeekWebStatus(state: state)
         lastState = state
         updateStatusTitle()
         rebuildMenu()
@@ -106,12 +135,10 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
 
     private func updateStatusTitle() {
         let serviceOK = (lastState["ok"] as? Bool) == true
-        let codexOK = ((lastState["codex"] as? [String: Any])?["ok"] as? Bool) == true
-        let opencodeOK = ((lastState["opencode"] as? [String: Any])?["ok"] as? Bool) == true
-        let antigravityOK = ((lastState["antigravity"] as? [String: Any])?["ok"] as? Bool) == true
-        statusItem.button?.toolTip = serviceOK && codexOK && opencodeOK && antigravityOK ? text("LocalBrain: running", "LocalBrain\u{FF1A}\u{8FD0}\u{884C}\u{4E2D}") : text("LocalBrain: attention needed", "LocalBrain\u{FF1A}\u{9700}\u{8981}\u{5904}\u{7406}")
+        let attentionNeeded = !serviceOK || channelSummaries().contains { channelHealthLevel($0) == .error }
+        statusItem.button?.toolTip = compactTopStatusTitle()
         if statusItem.button?.image == nil {
-            statusItem.button?.title = serviceOK && codexOK && opencodeOK && antigravityOK ? "LB" : "LB!"
+            statusItem.button?.title = attentionNeeded ? "LB!" : "LB"
         }
     }
 
@@ -137,79 +164,34 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
 
         let serviceOK = (lastState["ok"] as? Bool) == true
-        let codex = lastState["codex"] as? [String: Any] ?? [:]
-        let codexOK = (codex["ok"] as? Bool) == true
-        let opencode = lastState["opencode"] as? [String: Any] ?? [:]
-        let opencodeOK = (opencode["ok"] as? Bool) == true
-        let antigravity = lastState["antigravity"] as? [String: Any] ?? [:]
-        let antigravityOK = (antigravity["ok"] as? Bool) == true
-        let deepseekWeb = lastState["deepseekWeb"] as? [String: Any] ?? [:]
-        let deepseekWebEnabled = (deepseekWeb["enabled"] as? Bool) == true
-        let deepseekWebOK = (deepseekWeb["ok"] as? Bool) == true
-
-        menu.addItem(coloredItem(title: serviceOK ? text("● LocalBrain: running", "\u{25CF} LocalBrain\u{FF1A}\u{8FD0}\u{884C}\u{4E2D}") : text("● LocalBrain: not running", "\u{25CF} LocalBrain\u{FF1A}\u{672A}\u{8FD0}\u{884C}"), ok: serviceOK))
-        menu.addItem(coloredItem(title: codexOK ? text("● Codex: ready", "\u{25CF} Codex\u{FF1A}\u{53EF}\u{7528}") : text("● Codex: setup needed", "\u{25CF} Codex\u{FF1A}\u{9700}\u{8981}\u{914D}\u{7F6E}"), ok: codexOK))
-        menu.addItem(coloredItem(title: opencodeOK ? text("● OpenCode: ready", "\u{25CF} OpenCode\u{FF1A}\u{53EF}\u{7528}") : text("● OpenCode: setup needed", "\u{25CF} OpenCode\u{FF1A}\u{9700}\u{8981}\u{914D}\u{7F6E}"), ok: opencodeOK))
-        menu.addItem(coloredItem(title: antigravityOK ? text("● Antigravity: ready", "\u{25CF} Antigravity\u{FF1A}\u{53EF}\u{7528}") : text("● Antigravity: setup needed", "\u{25CF} Antigravity\u{FF1A}\u{9700}\u{8981}\u{914D}\u{7F6E}"), ok: antigravityOK))
-        if deepseekWebEnabled {
-            menu.addItem(coloredItem(title: deepseekWebOK ? text("● DeepSeek Web: ready", "\u{25CF} DeepSeek Web\u{FF1A}\u{53EF}\u{7528}") : text("● DeepSeek Web: unavailable", "\u{25CF} DeepSeek Web\u{FF1A}\u{4E0D}\u{53EF}\u{7528}"), ok: deepseekWebOK))
-        }
-        addUpstreamStatusItems(to: menu)
+        let channels = channelSummaries()
+        let hasChannelErrors = channels.contains { channelHealthLevel($0) == .error }
+        let hasUnstableChannels = channels.contains { channelHealthLevel($0) == .unstable }
+        menu.addItem(coloredItem(title: compactTopStatusTitle(), ok: serviceOK && !hasChannelErrors && !hasUnstableChannels, warning: serviceOK && !hasChannelErrors && hasUnstableChannels))
+        menu.addItem(disabledItem(recommendedChannelTitle()))
+        menu.addItem(actionItem(text("Open Console", "\u{6253}\u{5F00}\u{63A7}\u{5236}\u{53F0}"), #selector(openConsole)))
+        menu.addItem(actionItem(text("Refresh Status", "\u{5237}\u{65B0}\u{72B6}\u{6001}"), #selector(refreshStatusAction)))
         menu.addItem(NSMenuItem.separator())
 
-        let configure = NSMenuItem(title: providerRootTitle(text("Configure Codex", "\u{914D}\u{7F6E} Codex"), providerId: "codex-chatgpt-local"), action: nil, keyEquivalent: "")
-        configure.state = providerFilterEnabled(providerId: "codex-chatgpt-local") ? .on : .off
-        configure.submenu = providerConfigurationMenu(
-            providerId: "codex-chatgpt-local",
-            configureTitle: text("Check / Configure Codex", "\u{68C0}\u{67E5} / \u{914D}\u{7F6E} Codex"),
-            configureAction: #selector(configureCodex)
-        )
-        menu.addItem(configure)
+        let attentionRoot = NSMenuItem(title: text("Needs Attention", "\u{9700}\u{8981}\u{5904}\u{7406}"), action: nil, keyEquivalent: "")
+        attentionRoot.submenu = attentionChannelsMenu()
+        menu.addItem(attentionRoot)
 
-        let configureOpenCodeItem = NSMenuItem(title: providerRootTitle(text("Configure OpenCode", "\u{914D}\u{7F6E} OpenCode"), providerId: "opencode-local"), action: nil, keyEquivalent: "")
-        configureOpenCodeItem.state = providerFilterEnabled(providerId: "opencode-local") ? .on : .off
-        configureOpenCodeItem.submenu = providerConfigurationMenu(
-            providerId: "opencode-local",
-            configureTitle: text("Check / Configure OpenCode", "\u{68C0}\u{67E5} / \u{914D}\u{7F6E} OpenCode"),
-            configureAction: #selector(configureOpenCode)
-        )
-        menu.addItem(configureOpenCodeItem)
+        let allChannelsRoot = NSMenuItem(title: text("All Channels", "\u{5168}\u{90E8}\u{901A}\u{9053}"), action: nil, keyEquivalent: "")
+        allChannelsRoot.submenu = allChannelsMenu()
+        menu.addItem(allChannelsRoot)
 
-        let configureAntigravityItem = NSMenuItem(title: providerRootTitle(text("Configure Antigravity", "\u{914D}\u{7F6E} Antigravity"), providerId: "antigravity-local"), action: nil, keyEquivalent: "")
-        configureAntigravityItem.state = providerFilterEnabled(providerId: "antigravity-local") ? .on : .off
-        configureAntigravityItem.submenu = providerConfigurationMenu(
-            providerId: "antigravity-local",
-            configureTitle: text("Check / Configure Antigravity", "\u{68C0}\u{67E5} / \u{914D}\u{7F6E} Antigravity"),
-            configureAction: #selector(configureAntigravity)
-        )
-        menu.addItem(configureAntigravityItem)
+        menu.addItem(NSMenuItem.separator())
 
-        let configureUpstreamKey = NSMenuItem(title: upstreamRootTitle(), action: nil, keyEquivalent: "")
-        configureUpstreamKey.state = upstreamProvidersEnabled() ? .on : .off
-        configureUpstreamKey.submenu = configureUpstreamKeyMenu()
-        menu.addItem(configureUpstreamKey)
-
-        let configureDeepSeekWebItem = NSMenuItem(title: deepSeekRootTitle(), action: nil, keyEquivalent: "")
-        configureDeepSeekWebItem.state = deepseekWebEnabled ? .on : .off
-        let deepSeekMenu = NSMenu()
-        deepSeekMenu.addItem(actionItem(text("Set Token / Enable", "\u{8BBE}\u{7F6E} Token / \u{542F}\u{7528}"), #selector(configureDeepSeekWeb)))
-        deepSeekMenu.addItem(actionItem(text("Open DeepSeek Web", "\u{6253}\u{5F00} DeepSeek Web"), #selector(openDeepSeekWeb)))
-        configureDeepSeekWebItem.submenu = deepSeekMenu
-        menu.addItem(configureDeepSeekWebItem)
-
-        let modelRoot = NSMenuItem(title: text("Model", "\u{6A21}\u{578B}"), action: nil, keyEquivalent: "")
-        modelRoot.submenu = modelMenu()
-        menu.addItem(modelRoot)
+        let commonRoot = NSMenuItem(title: text("Common Actions", "\u{5E38}\u{7528}\u{64CD}\u{4F5C}"), action: nil, keyEquivalent: "")
+        commonRoot.submenu = commonActionsMenu()
+        menu.addItem(commonRoot)
 
         let sourceRoot = NSMenuItem(title: text("Model Sources", "\u{6A21}\u{578B}\u{6765}\u{6E90}"), action: nil, keyEquivalent: "")
         sourceRoot.submenu = modelSourcesMenu()
         menu.addItem(sourceRoot)
 
-        let keyRoot = NSMenuItem(title: "Key", action: nil, keyEquivalent: "")
-        keyRoot.submenu = keyMenu()
-        menu.addItem(keyRoot)
-
-        let settingsRoot = NSMenuItem(title: text("Settings", "\u{8BBE}\u{7F6E}"), action: nil, keyEquivalent: "")
+        let settingsRoot = NSMenuItem(title: text("Advanced Settings", "\u{9AD8}\u{7EA7}\u{8BBE}\u{7F6E}"), action: nil, keyEquivalent: "")
         settingsRoot.submenu = settingsMenu()
         menu.addItem(settingsRoot)
 
@@ -217,16 +199,291 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         menu.addItem(actionItem(text("Quit", "\u{9000}\u{51FA}"), #selector(quit)))
     }
 
+    private func compactTopStatusTitle() -> String {
+        let serviceOK = (lastState["ok"] as? Bool) == true
+        let channels = channelSummaries()
+        let okCount = channels.filter { channelHealthLevel($0) == .ok }.count
+        let unstableCount = channels.filter { channelHealthLevel($0) == .unstable }.count
+        let errorCount = channels.filter { channelHealthLevel($0) == .error }.count
+
+        if !serviceOK {
+            return text(
+                "\u{25CF} LocalBrain not running · Channels \(okCount)/\(channels.count) ready",
+                "\u{25CF} 未运行 · 通道 \(okCount)/\(channels.count) 可用"
+            )
+        }
+        let errorText = errorCount > 0 ? text(" · \(errorCount) error", " · \(errorCount) 异常") : ""
+        let unstableText = unstableCount > 0 ? text(" · \(unstableCount) unstable", " · \(unstableCount) 不稳定") : ""
+        return text(
+            "\u{25CF} LocalBrain running · \(okCount) ready\(unstableText)\(errorText)",
+            "\u{25CF} 运行中 · \(okCount) 可用\(unstableText)\(errorText)"
+        )
+    }
+
+    private func recommendedChannelTitle() -> String {
+        guard let recommended = recommendedChannel() else {
+            return text("Recommended: none", "\u{63A8}\u{8350}\u{FF1A}\u{65E0}")
+        }
+        let speed = recommended.durationMs.map { formatDuration($0) } ?? "-"
+        return text(
+            "Recommended: \(recommended.label) · \(providerShortName(for: recommended)) · \(speed)",
+            "\u{63A8}\u{8350}\u{FF1A}\(recommended.label) · \(providerShortName(for: recommended)) · \(speed)"
+        )
+    }
+
+    private func recommendedChannel() -> ChannelSummary? {
+        allChannelSummariesForChoosing().first
+    }
+
+    private func allChannelSummariesForChoosing() -> [ChannelSummary] {
+        channelSummaries().sorted { left, right in
+            let leftRank = channelChoiceRank(channelHealthLevel(left))
+            let rightRank = channelChoiceRank(channelHealthLevel(right))
+            if leftRank != rightRank { return leftRank < rightRank }
+
+            let leftDuration = left.durationMs ?? Int.max
+            let rightDuration = right.durationMs ?? Int.max
+            if leftDuration != rightDuration { return leftDuration < rightDuration }
+
+            return left.label.localizedStandardCompare(right.label) == .orderedAscending
+        }
+    }
+
+    private func channelChoiceRank(_ level: ChannelHealthLevel) -> Int {
+        switch level {
+        case .ok:
+            return 0
+        case .unstable:
+            return 1
+        case .unknown:
+            return 2
+        case .error:
+            return 3
+        }
+    }
+
+    private func attentionChannelsMenu() -> NSMenu {
+        let menu = NSMenu()
+        let channels = sortedChannelSummaries().filter {
+            let level = channelHealthLevel($0)
+            return level == .error || level == .unstable
+        }
+        guard !channels.isEmpty else {
+            menu.addItem(disabledItem(text("No channels need attention", "\u{6CA1}\u{6709}\u{9700}\u{8981}\u{5904}\u{7406}\u{7684}\u{901A}\u{9053}")))
+            return menu
+        }
+        for channel in channels {
+            let item = NSMenuItem(title: channelTitle(channel), action: nil, keyEquivalent: "")
+            item.submenu = localChannelMenu(channel)
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    private func allChannelsMenu() -> NSMenu {
+        let menu = NSMenu()
+        let channels = allChannelSummariesForChoosing()
+        guard !channels.isEmpty else {
+            menu.addItem(disabledItem(text("No local channels", "\u{6CA1}\u{6709}\u{672C}\u{5730}\u{901A}\u{9053}")))
+            return menu
+        }
+        for channel in channels {
+            let item = NSMenuItem(title: channelTitle(channel), action: nil, keyEquivalent: "")
+            item.submenu = localChannelMenu(channel)
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    private func commonActionsMenu() -> NSMenu {
+        let menu = NSMenu()
+        let baseURL = lastState["openAIBaseUrl"] as? String ?? "http://127.0.0.1:8787/v1"
+        menu.addItem(actionItem(text("Copy Base URL", "\u{590D}\u{5236} Base URL"), #selector(copyBaseURL)))
+        menu.addItem(disabledItem(baseURL))
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(actionItem(text("Generate New Channel", "\u{751F}\u{6210}\u{65B0}\u{901A}\u{9053}"), #selector(generateKey)))
+        menu.addItem(actionItem(text("Export All Keys", "\u{5BFC}\u{51FA}\u{5168}\u{90E8} Key"), #selector(exportKeys)))
+        menu.addItem(actionItem(text("Test All Channels (calls models)", "\u{6D4B}\u{8BD5}\u{5168}\u{90E8}\u{901A}\u{9053}\u{FF08}\u{4F1A}\u{8C03}\u{7528}\u{6A21}\u{578B}\u{FF09}"), #selector(testAllChannels)))
+        return menu
+    }
+
+    private func channelSummaries() -> [ChannelSummary] {
+        let apiKeyDetails = lastState["apiKeyDetails"] as? [[String: Any]] ?? []
+        let keys = lastState["apiKeys"] as? [String] ?? []
+        let routes = lastState["apiKeyRoutes"] as? [String: Any] ?? [:]
+        let labels = lastState["apiKeyLabels"] as? [String: String] ?? [:]
+        let healthItems = lastState["keyHealth"] as? [[String: Any]] ?? []
+        let healthByKey = Dictionary(uniqueKeysWithValues: healthItems.compactMap { item -> (String, [String: Any])? in
+            guard let key = item["apiKey"] as? String else { return nil }
+            return (key, item)
+        })
+        let details = apiKeyDetails.isEmpty
+            ? keys.map { ["key": $0, "label": labels[$0] as Any, "route": routes[$0] as Any] }
+            : apiKeyDetails
+
+        return details.compactMap { detail in
+            guard let key = detail["key"] as? String else { return nil }
+            let route = detail["route"] as? [String: Any]
+            let health = healthByKey[key] ?? [:]
+            let assignedModel = route?["model"] as? String
+            let displayModel = assignedModel
+                ?? health["model"] as? String
+                ?? lastState["defaultModel"] as? String
+                ?? "default"
+            let label = (detail["label"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let providerId = route?["providerId"] as? String ?? health["providerId"] as? String
+            return ChannelSummary(
+                key: key,
+                label: label?.isEmpty == false ? label! : mask(key),
+                assignedModel: assignedModel,
+                displayModel: displayModel,
+                providerId: providerId,
+                status: health["status"] as? String ?? "unknown",
+                durationMs: intValue(health["durationMs"]),
+                tokensPerSecond: doubleValue(health["tokensPerSecond"]),
+                successRate: doubleValue(health["successRate"]),
+                recentPerMinute: intValue(health["recentPerMinute"]) ?? 0,
+                recentCount: intValue(health["recentCount"]) ?? 0,
+                lastTestAt: health["lastTestAt"] as? String,
+                errorMessage: health["errorMessage"] as? String
+            )
+        }
+    }
+
+    private func channelTitle(_ channel: ChannelSummary) -> String {
+        let statusText = channelHealthText(channelHealthLevel(channel))
+        let speed = channel.durationMs.map { formatDuration($0) } ?? "-"
+        let success = formatSuccessRate(channel.successRate)
+        return "\(channel.label) · \(providerShortName(for: channel)) · \(statusText) · \(speed) · \(success)"
+    }
+
+    private func sortedChannelSummaries() -> [ChannelSummary] {
+        channelSummaries().sorted { left, right in
+            let leftRank = channelHealthRank(channelHealthLevel(left))
+            let rightRank = channelHealthRank(channelHealthLevel(right))
+            if leftRank != rightRank { return leftRank < rightRank }
+
+            let leftDuration = left.durationMs ?? -1
+            let rightDuration = right.durationMs ?? -1
+            if leftDuration != rightDuration { return leftDuration > rightDuration }
+
+            return left.label.localizedStandardCompare(right.label) == .orderedAscending
+        }
+    }
+
+    private func channelHealthLevel(_ channel: ChannelSummary) -> ChannelHealthLevel {
+        switch channel.status {
+        case "error":
+            return .error
+        case "ok":
+            let successRate = normalizedSuccessRate(channel.successRate)
+            if let successRate, successRate < 0.8 {
+                return .unstable
+            }
+            if let durationMs = channel.durationMs, durationMs >= 15_000 {
+                return .unstable
+            }
+            return .ok
+        case "unknown":
+            return .unknown
+        default:
+            return .unknown
+        }
+    }
+
+    private func channelHealthRank(_ level: ChannelHealthLevel) -> Int {
+        switch level {
+        case .error:
+            return 0
+        case .unstable:
+            return 1
+        case .unknown:
+            return 2
+        case .ok:
+            return 3
+        }
+    }
+
+    private func channelHealthText(_ level: ChannelHealthLevel) -> String {
+        switch level {
+        case .ok:
+            return text("ready", "\u{53EF}\u{7528}")
+        case .unstable:
+            return text("unstable", "\u{4E0D}\u{7A33}\u{5B9A}")
+        case .error:
+            return text("error", "\u{5F02}\u{5E38}")
+        case .unknown:
+            return text("unknown", "\u{672A}\u{77E5}")
+        }
+    }
+
+    private func normalizedSuccessRate(_ value: Double?) -> Double? {
+        guard let value else { return nil }
+        return value > 1.0 ? value / 100.0 : value
+    }
+
+    private func providerShortName(for channel: ChannelSummary) -> String {
+        return providerShortName(providerId: channel.providerId, modelId: channel.displayModel)
+    }
+
+    private func providerShortName(providerId: String?, modelId: String?) -> String {
+        if let providerId, !providerId.isEmpty {
+            if providerId == "codex-chatgpt-local" { return "Codex" }
+            if providerId == "opencode-local" { return "OpenCode" }
+            if providerId == "antigravity-local" { return "Antigravity" }
+            if providerId.hasPrefix("upstream-") {
+                return text("Upstream", "\u{4E0A}\u{6E38}")
+            }
+            return text("Upstream", "\u{4E0A}\u{6E38}")
+        }
+
+        let modelId = modelId ?? ""
+        if modelId.hasPrefix("opencode/") { return "OpenCode" }
+        if modelId.hasPrefix("antigravity/") { return "Antigravity" }
+        if modelId.hasPrefix("gpt-") { return "Codex" }
+        return text("Model", "\u{6A21}\u{578B}")
+    }
+
+    private func lastTestTimeText(_ value: String?) -> String {
+        guard let value, !value.isEmpty else {
+            return text("never", "\u{4ECE}\u{672A}")
+        }
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let date = iso.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+        guard let date else {
+            return text("unknown", "\u{672A}\u{77E5}")
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: language == .chinese ? "zh_CN" : "en_US")
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+
+    private func availableModelInfos() -> [ModelInfo] {
+        let selected = lastState["defaultModel"] as? String ?? "gpt-5.4-mini"
+        let modelDetails = lastState["availableModelDetails"] as? [[String: Any]] ?? []
+        if modelDetails.isEmpty {
+            return (lastState["availableModels"] as? [String] ?? [selected]).map {
+                ModelInfo(id: $0, providerId: nil, free: false, displayName: nil)
+            }
+        }
+        return modelDetails.compactMap { detail in
+            guard let id = detail["id"] as? String else { return nil }
+            return ModelInfo(
+                id: id,
+                providerId: detail["providerId"] as? String,
+                free: (detail["free"] as? Bool) == true,
+                displayName: detail["displayName"] as? String
+            )
+        }
+    }
+
     private func modelMenu() -> NSMenu {
         let modelMenu = NSMenu()
-        let selected = lastState["defaultModel"] as? String ?? "gpt-5.5-mini"
-        let modelDetails = lastState["availableModelDetails"] as? [[String: Any]] ?? []
-        let models: [(id: String, providerId: String?, free: Bool)] = modelDetails.isEmpty
-            ? (lastState["availableModels"] as? [String] ?? [selected]).map { ($0, nil, false) }
-            : modelDetails.compactMap { detail in
-                guard let id = detail["id"] as? String else { return nil }
-                return (id, detail["providerId"] as? String, (detail["free"] as? Bool) == true)
-            }
+        let selected = lastState["defaultModel"] as? String ?? "gpt-5.4-mini"
+        let models = availableModelInfos()
         let visibleModels = showFreeModelsOnly ? models.filter { $0.free } : models
 
         let freeOnly = NSMenuItem(title: text("Only Show Free Models", "\u{53EA}\u{663E}\u{793A}\u{514D}\u{8D39}\u{6A21}\u{578B}"), action: #selector(toggleFreeModelsOnly), keyEquivalent: "")
@@ -256,7 +513,6 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
     private func modelSourcesMenu() -> NSMenu {
         let menu = NSMenu()
         let providers = lastState["providers"] as? [[String: Any]] ?? []
-        let filters = lastState["modelProviderFilters"] as? [String: Any] ?? [:]
 
         if providers.isEmpty {
             menu.addItem(disabledItem(text("No model sources", "\u{6CA1}\u{6709}\u{6A21}\u{578B}\u{6765}\u{6E90}")))
@@ -265,75 +521,71 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
 
         for provider in providers {
             guard let providerId = provider["id"] as? String else { continue }
-            let filter = filters[providerId] as? [String: Any] ?? [:]
-            let enabled = (filter["enabled"] as? Bool) != false
-            let freeOnly = (filter["freeOnly"] as? Bool) == true
-            let displayName = provider["displayName"] as? String ?? providerId
-
-            let root = NSMenuItem(title: "\(displayName)\(enabled ? "" : " - off")\(freeOnly ? " - free only" : "")", action: nil, keyEquivalent: "")
-            let source = NSMenu()
-
-            let enabledItem = NSMenuItem(title: text("Enabled", "\u{542F}\u{7528}"), action: #selector(updateProviderFilter(_:)), keyEquivalent: "")
-            enabledItem.target = self
-            enabledItem.state = enabled ? .on : .off
-            enabledItem.representedObject = [
-                "providerId": providerId,
-                "enabled": !enabled,
-                "freeOnly": freeOnly,
-                "only": false
-            ]
-            source.addItem(enabledItem)
-
-            let freeItem = NSMenuItem(title: text("Free Only", "\u{53EA}\u{7528}\u{514D}\u{8D39}\u{6A21}\u{578B}"), action: #selector(updateProviderFilter(_:)), keyEquivalent: "")
-            freeItem.target = self
-            freeItem.state = freeOnly ? .on : .off
-            freeItem.representedObject = [
-                "providerId": providerId,
-                "enabled": enabled,
-                "freeOnly": !freeOnly,
-                "only": false
-            ]
-            source.addItem(freeItem)
-
-            let onlyFree = NSMenuItem(title: text("Use Only This Free Source", "\u{53EA}\u{7528}\u{8FD9}\u{4E2A}\u{514D}\u{8D39}\u{6765}\u{6E90}"), action: #selector(updateProviderFilter(_:)), keyEquivalent: "")
-            onlyFree.target = self
-            onlyFree.representedObject = [
-                "providerId": providerId,
-                "enabled": true,
-                "freeOnly": true,
-                "only": true
-            ]
-            source.addItem(onlyFree)
-
-            root.submenu = source
+            let displayName = providerDisplayName(providerId: providerId, fallback: provider["displayName"] as? String)
+            let root = NSMenuItem(title: providerSourceTitle(displayName: displayName, providerId: providerId), action: nil, keyEquivalent: "")
+            root.submenu = providerSourceMenu(providerId: providerId, displayName: displayName)
             menu.addItem(root)
         }
 
+        let upstreamRoot = NSMenuItem(title: upstreamSourceTitle(), action: nil, keyEquivalent: "")
+        upstreamRoot.submenu = configureUpstreamKeyMenu()
+        menu.addItem(upstreamRoot)
         return menu
     }
 
-    private func addUpstreamStatusItems(to menu: NSMenu) {
-        let statuses = upstreamProviderStatuses()
-        guard !statuses.isEmpty else { return }
-
-        let usableCount = statuses.filter { $0.usable }.count
-        let summary = text(
-            "\u{25CF} Upstream Keys: \(usableCount)/\(statuses.count) ready",
-            "\u{25CF} \u{4E0A}\u{6E38} Key\u{FF1A}\(usableCount)/\(statuses.count) \u{53EF}\u{7528}"
-        )
-        menu.addItem(coloredItem(title: summary, ok: usableCount == statuses.count))
-
-        for status in statuses {
-            let stateText: String
-            if !status.enabled {
-                stateText = text("off", "\u{5DF2}\u{5173}\u{95ED}")
-            } else if status.usable {
-                stateText = text("ready", "\u{53EF}\u{7528}")
-            } else {
-                stateText = text("unavailable", "\u{4E0D}\u{53EF}\u{7528}")
-            }
-            menu.addItem(coloredItem(title: "\u{25CF} \(status.displayName): \(stateText)", ok: status.usable))
+    private func providerSourceMenu(providerId: String, displayName: String) -> NSMenu {
+        let menu = NSMenu()
+        switch providerId {
+        case "codex-chatgpt-local":
+            menu.addItem(actionItem(text("Check / Configure Codex", "\u{68C0}\u{67E5} / \u{914D}\u{7F6E} Codex"), #selector(configureCodex)))
+            menu.addItem(NSMenuItem.separator())
+        case "opencode-local":
+            menu.addItem(actionItem(text("Check / Configure OpenCode", "\u{68C0}\u{67E5} / \u{914D}\u{7F6E} OpenCode"), #selector(configureOpenCode)))
+            menu.addItem(NSMenuItem.separator())
+        case "antigravity-local":
+            menu.addItem(actionItem(text("Check / Configure Antigravity", "\u{68C0}\u{67E5} / \u{914D}\u{7F6E} Antigravity"), #selector(configureAntigravity)))
+            menu.addItem(NSMenuItem.separator())
+        default:
+            menu.addItem(disabledItem(displayName))
+            menu.addItem(NSMenuItem.separator())
         }
+        addProviderFilterItems(to: menu, providerId: providerId)
+        return menu
+    }
+
+    private func providerSourceTitle(displayName: String, providerId: String) -> String {
+        let enabled = providerFilterEnabled(providerId: providerId)
+        let freeOnly = providerFilterFreeOnly(providerId: providerId)
+        let status = enabled ? text("On", "\u{5F00}") : text("Off", "\u{5173}")
+        let free = freeOnly ? text(", free only", "\u{FF0C}\u{53EA}\u{514D}\u{8D39}") : ""
+        return "\(displayName): \(status)\(free)"
+    }
+
+    private func providerDisplayName(providerId: String, fallback: String?) -> String {
+        switch providerId {
+        case "codex-chatgpt-local":
+            return "Codex"
+        case "opencode-local":
+            return "OpenCode"
+        case "antigravity-local":
+            return "Antigravity"
+        default:
+            return fallback ?? providerId
+        }
+    }
+
+    private func upstreamSourceTitle() -> String {
+        let statuses = upstreamProviderStatuses()
+        guard !statuses.isEmpty else {
+            return text("Upstream Key: no keys", "\u{4E0A}\u{6E38} Key\u{FF1A}\u{65E0} Key")
+        }
+        let usableCount = statuses.filter { $0.usable }.count
+        let enabled = upstreamProvidersEnabled()
+        let status = enabled ? text("On", "\u{5F00}") : text("Off", "\u{5173}")
+        return text(
+            "Upstream Key: \(status), \(usableCount)/\(statuses.count) ready",
+            "\u{4E0A}\u{6E38} Key\u{FF1A}\(status)\u{FF0C}\(usableCount)/\(statuses.count) \u{53EF}\u{7528}"
+        )
     }
 
     private func upstreamProviderStatuses() -> [(id: String, displayName: String, enabled: Bool, usable: Bool)] {
@@ -348,36 +600,6 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
             let usable = enabled && modelProviderIds.contains(providerId)
             return (id: providerId, displayName: displayName, enabled: enabled, usable: usable)
         }
-    }
-
-    private func keyMenu() -> NSMenu {
-        let keyMenu = NSMenu()
-        let keys = lastState["apiKeys"] as? [String] ?? []
-        let keyRoutes = lastState["apiKeyRoutes"] as? [String: Any] ?? [:]
-        let baseURL = lastState["openAIBaseUrl"] as? String ?? "http://127.0.0.1:8787/v1"
-
-        keyMenu.addItem(disabledItem("OPENAI_BASE_URL"))
-        keyMenu.addItem(actionItem(text("Copy \(baseURL)", "\u{590D}\u{5236} \(baseURL)"), #selector(copyBaseURL)))
-        keyMenu.addItem(NSMenuItem.separator())
-
-        if keys.isEmpty {
-            keyMenu.addItem(disabledItem(text("No local keys", "\u{6CA1}\u{6709}\u{672C}\u{5730} Key")))
-        } else {
-            for key in keys {
-                let route = keyRoutes[key] as? [String: Any]
-                let assignedModel = route?["model"] as? String
-                let titleKey = showKeys ? key : mask(key)
-                let item = NSMenuItem(title: assignedModel == nil ? titleKey : "\(titleKey) -> \(assignedModel!)", action: nil, keyEquivalent: "")
-                item.submenu = localKeyMenu(key: key, assignedModel: assignedModel)
-                keyMenu.addItem(item)
-            }
-        }
-
-        keyMenu.addItem(NSMenuItem.separator())
-        keyMenu.addItem(actionItem(showKeys ? text("Hide Keys", "\u{9690}\u{85CF} Key") : text("Show Keys", "\u{663E}\u{793A} Key"), #selector(toggleKeys)))
-        keyMenu.addItem(actionItem(text("Generate New Key", "\u{751F}\u{6210}\u{65B0} Key"), #selector(generateKey)))
-        keyMenu.addItem(actionItem(text("Replace With New Key", "\u{66FF}\u{6362}\u{4E3A}\u{65B0} Key"), #selector(replaceKey)))
-        return keyMenu
     }
 
     private func configureUpstreamKeyMenu() -> NSMenu {
@@ -430,14 +652,6 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         return menu
     }
 
-    private func providerConfigurationMenu(providerId: String, configureTitle: String, configureAction: Selector) -> NSMenu {
-        let menu = NSMenu()
-        menu.addItem(actionItem(configureTitle, configureAction))
-        menu.addItem(NSMenuItem.separator())
-        addProviderFilterItems(to: menu, providerId: providerId)
-        return menu
-    }
-
     private func addProviderFilterItems(to menu: NSMenu, providerId: String) {
         let enabled = providerFilterEnabled(providerId: providerId)
         let freeOnly = providerFilterFreeOnly(providerId: providerId)
@@ -453,6 +667,17 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         ]
         menu.addItem(enabledItem)
 
+        let freeOnlyItem = NSMenuItem(title: text("Free Only", "\u{53EA}\u{7528}\u{514D}\u{8D39}\u{6A21}\u{578B}"), action: #selector(updateProviderFilter(_:)), keyEquivalent: "")
+        freeOnlyItem.target = self
+        freeOnlyItem.state = freeOnly ? .on : .off
+        freeOnlyItem.representedObject = [
+            "providerId": providerId,
+            "enabled": enabled,
+            "freeOnly": !freeOnly,
+            "only": false
+        ]
+        menu.addItem(freeOnlyItem)
+
         let onlyThisSource = NSMenuItem(title: text("Use Only This Source", "\u{53EA}\u{7528}\u{8FD9}\u{4E2A}\u{6765}\u{6E90}"), action: #selector(updateProviderFilter(_:)), keyEquivalent: "")
         onlyThisSource.target = self
         onlyThisSource.representedObject = [
@@ -462,30 +687,6 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
             "only": true
         ]
         menu.addItem(onlyThisSource)
-    }
-
-    private func providerRootTitle(_ title: String, providerId: String) -> String {
-        let enabled = providerFilterEnabled(providerId: providerId)
-        let freeOnly = providerFilterFreeOnly(providerId: providerId)
-        let status = enabled ? text("On", "\u{5F00}") : text("Off", "\u{5173}")
-        let freeSuffix = freeOnly ? text(", free only", "\u{FF0C}\u{53EA}\u{514D}\u{8D39}") : ""
-        return "\(title) (\(status)\(freeSuffix))"
-    }
-
-    private func upstreamRootTitle() -> String {
-        let title = text("Configure Upstream Key", "\u{914D}\u{7F6E}\u{4E0A}\u{6E38} Key")
-        let providers = lastState["upstreamProviders"] as? [[String: Any]] ?? []
-        guard !providers.isEmpty else { return "\(title) (\(text("No keys", "\u{65E0} Key")))" }
-        let status = upstreamProvidersEnabled() ? text("On", "\u{5F00}") : text("Off", "\u{5173}")
-        return "\(title) (\(status))"
-    }
-
-    private func deepSeekRootTitle() -> String {
-        let title = text("Configure DeepSeek Web", "\u{914D}\u{7F6E} DeepSeek Web")
-        let status = ((lastState["deepseekWeb"] as? [String: Any])?["enabled"] as? Bool) == true
-            ? text("On", "\u{5F00}")
-            : text("Off", "\u{5173}")
-        return "\(title) (\(status))"
     }
 
     private func upstreamProvidersEnabled() -> Bool {
@@ -509,77 +710,106 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         return (filter["freeOnly"] as? Bool) == true
     }
 
-    private func localKeyMenu(key: String, assignedModel: String?) -> NSMenu {
+    private func localChannelMenu(_ channel: ChannelSummary) -> NSMenu {
         let menu = NSMenu()
-        let copy = NSMenuItem(title: showKeys ? text("Copy \(key)", "\u{590D}\u{5236} \(key)") : text("Copy \(mask(key))", "\u{590D}\u{5236} \(mask(key))"), action: #selector(copyKey(_:)), keyEquivalent: "")
-        copy.target = self
-        copy.representedObject = key
-        menu.addItem(copy)
+        if showKeys {
+            menu.addItem(disabledItem(channel.key))
+        } else {
+            menu.addItem(disabledItem(mask(channel.key)))
+        }
+        menu.addItem(disabledItem(text("Model: \(channel.displayModel)", "\u{6A21}\u{578B}\u{FF1A}\(channel.displayModel)")))
+        menu.addItem(disabledItem(text("Last test: \(lastTestTimeText(channel.lastTestAt))", "\u{6700}\u{8FD1}\u{6D4B}\u{8BD5}\u{FF1A}\(lastTestTimeText(channel.lastTestAt))")))
+        menu.addItem(disabledItem(text("Status: \(channelStatusDetail(channel))", "\u{72B6}\u{6001}\u{FF1A}\(channelStatusDetail(channel))")))
+        if let error = channel.errorMessage, !error.isEmpty {
+            menu.addItem(disabledItem(text("Error: \(compactLabel(error, maxLength: 72))", "\u{9519}\u{8BEF}\u{FF1A}\(compactLabel(error, maxLength: 72))")))
+        }
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(disabledItem(assignedModel == nil ? text("Assigned: default routing", "\u{5DF2}\u{6307}\u{5B9A}\u{FF1A}\u{9ED8}\u{8BA4}\u{8DEF}\u{7531}") : text("Assigned: \(assignedModel!)", "\u{5DF2}\u{6307}\u{5B9A}\u{FF1A}\(assignedModel!)")))
 
-        let assign = NSMenuItem(title: text("Assign Current Model", "\u{6307}\u{5B9A}\u{4E3A}\u{5F53}\u{524D}\u{6A21}\u{578B}"), action: #selector(assignKeyToCurrentModel(_:)), keyEquivalent: "")
-        assign.target = self
-        assign.representedObject = key
-        menu.addItem(assign)
+        let copy = NSMenuItem(title: text("Copy Key", "\u{590D}\u{5236} Key"), action: #selector(copyKey(_:)), keyEquivalent: "")
+        copy.target = self
+        copy.representedObject = channel.key
+        menu.addItem(copy)
+
+        let test = NSMenuItem(title: text("Test This Channel", "\u{6D4B}\u{8BD5}\u{6B64}\u{901A}\u{9053}"), action: #selector(testChannel(_:)), keyEquivalent: "")
+        test.target = self
+        test.representedObject = channel.key
+        menu.addItem(test)
 
         let assignModel = NSMenuItem(title: text("Assign Model", "\u{6307}\u{5B9A}\u{6A21}\u{578B}"), action: nil, keyEquivalent: "")
-        assignModel.submenu = keyModelAssignmentMenu(key: key, assignedModel: assignedModel)
+        assignModel.submenu = keyModelAssignmentMenu(key: channel.key, assignedModel: channel.assignedModel)
         menu.addItem(assignModel)
 
         let clear = NSMenuItem(title: text("Clear Model Assignment", "\u{6E05}\u{9664}\u{6A21}\u{578B}\u{6307}\u{5B9A}"), action: #selector(clearKeyModel(_:)), keyEquivalent: "")
         clear.target = self
-        clear.representedObject = key
-        clear.isEnabled = assignedModel != nil
+        clear.representedObject = channel.key
+        clear.isEnabled = channel.assignedModel != nil
         menu.addItem(clear)
 
-        let delete = NSMenuItem(title: text("Delete Key", "\u{5220}\u{9664} Key"), action: #selector(deleteLocalKey(_:)), keyEquivalent: "")
+        let delete = NSMenuItem(title: text("Delete Channel", "\u{5220}\u{9664}\u{901A}\u{9053}"), action: #selector(deleteLocalKey(_:)), keyEquivalent: "")
         delete.target = self
-        delete.representedObject = key
+        delete.representedObject = channel.key
         menu.addItem(delete)
         return menu
     }
 
     private func keyModelAssignmentMenu(key: String, assignedModel: String?) -> NSMenu {
         let menu = NSMenu()
-        let modelDetails = lastState["availableModelDetails"] as? [[String: Any]] ?? []
-        let models: [(id: String, providerId: String?, free: Bool)] = modelDetails.compactMap { detail in
-            guard let id = detail["id"] as? String else { return nil }
-            return (id, detail["providerId"] as? String, (detail["free"] as? Bool) == true)
-        }
+        let models = availableModelInfos()
 
         if models.isEmpty {
             menu.addItem(disabledItem(text("No available models", "\u{6CA1}\u{6709}\u{53EF}\u{9009}\u{6A21}\u{578B}")))
             return menu
         }
 
-        for model in models {
-            let title = "\(model.id)\(model.free ? " - free" : "")\(model.providerId == nil ? "" : " · \(model.providerId!)")"
-            let item = NSMenuItem(title: title, action: #selector(assignKeyToSelectedModel(_:)), keyEquivalent: "")
-            item.target = self
-            item.state = model.id == assignedModel ? .on : .off
-            item.representedObject = [
-                "apiKey": key,
-                "model": model.id
-            ]
-            menu.addItem(item)
+        let grouped = Dictionary(grouping: models) { model in
+            providerShortName(providerId: model.providerId, modelId: model.id)
+        }
+        let groupOrder = ["Codex", "OpenCode", "Antigravity", text("Upstream", "\u{4E0A}\u{6E38}")]
+        let orderedGroups = grouped.keys.sorted { left, right in
+            let leftIndex = groupOrder.firstIndex(of: left) ?? groupOrder.count
+            let rightIndex = groupOrder.firstIndex(of: right) ?? groupOrder.count
+            if leftIndex != rightIndex { return leftIndex < rightIndex }
+            return left.localizedStandardCompare(right) == .orderedAscending
+        }
+
+        for group in orderedGroups {
+            let root = NSMenuItem(title: group, action: nil, keyEquivalent: "")
+            let submenu = NSMenu()
+            for model in (grouped[group] ?? []).sorted(by: { $0.id.localizedStandardCompare($1.id) == .orderedAscending }) {
+                let freeSuffix = model.free ? " - \(text("free", "\u{514D}\u{8D39}"))" : ""
+                let title = "\(model.displayName ?? model.id)\(freeSuffix)"
+                let item = NSMenuItem(title: title, action: #selector(assignKeyToSelectedModel(_:)), keyEquivalent: "")
+                item.target = self
+                item.state = model.id == assignedModel ? .on : .off
+                item.representedObject = [
+                    "apiKey": key,
+                    "model": model.id
+                ]
+                submenu.addItem(item)
+            }
+            root.submenu = submenu
+            menu.addItem(root)
         }
         return menu
     }
 
     private func settingsMenu() -> NSMenu {
         let settings = NSMenu()
+        let defaultModelRoot = NSMenuItem(title: text("Default Fallback Route", "\u{9ED8}\u{8BA4}\u{5907}\u{7528}\u{8DEF}\u{7531}"), action: nil, keyEquivalent: "")
+        defaultModelRoot.submenu = modelMenu()
+        settings.addItem(defaultModelRoot)
+
         let languageRoot = NSMenuItem(title: text("Language", "\u{8BED}\u{8A00}"), action: nil, keyEquivalent: "")
         languageRoot.submenu = languageMenu()
         settings.addItem(languageRoot)
         settings.addItem(NSMenuItem.separator())
-        settings.addItem(actionItem(text("Open Console", "\u{6253}\u{5F00}\u{63A7}\u{5236}\u{53F0}"), #selector(openConsole)))
         settings.addItem(actionItem(text("Open Config File", "\u{6253}\u{5F00}\u{914D}\u{7F6E}\u{6587}\u{4EF6}"), #selector(openConfig)))
         settings.addItem(actionItem(text("Open Audit Log", "\u{6253}\u{5F00}\u{5BA1}\u{8BA1}\u{65E5}\u{5FD7}"), #selector(openAuditLog)))
         settings.addItem(NSMenuItem.separator())
-        settings.addItem(actionItem(text("Refresh Status", "\u{5237}\u{65B0}\u{72B6}\u{6001}"), #selector(refreshStatusAction)))
         settings.addItem(actionItem(text("Restart LocalBrain", "\u{91CD}\u{542F} LocalBrain"), #selector(restartServer)))
         settings.addItem(actionItem(text("Stop This Service", "\u{505C}\u{6B62}\u{672C}\u{6B21}\u{542F}\u{52A8}\u{7684}\u{670D}\u{52A1}"), #selector(stopOwnedServer)))
+        settings.addItem(NSMenuItem.separator())
+        settings.addItem(actionItem(text("Reset All Channel Keys...", "\u{91CD}\u{7F6E}\u{5168}\u{90E8}\u{901A}\u{9053} Key..."), #selector(replaceKey)))
         return settings
     }
 
@@ -643,70 +873,6 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
             NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/Antigravity.app"))
         }
         showAlert(title: text("Complete Antigravity setup", "\u{8BF7}\u{5B8C}\u{6210} Antigravity \u{914D}\u{7F6E}"), message: text("Antigravity has been opened. Sign in there, then return to LocalBrain and refresh status.", "\u{5DF2}\u{6253}\u{5F00} Antigravity\u{3002}\u{8BF7}\u{5728}\u{5176}\u{4E2D}\u{5B8C}\u{6210}\u{767B}\u{5F55}\u{FF0C}\u{7136}\u{540E}\u{56DE}\u{5230} LocalBrain \u{5237}\u{65B0}\u{72B6}\u{6001}\u{3002}"))
-    }
-
-    @objc private func configureDeepSeekWeb() {
-        if !isHealthOK() {
-            startServerIfNeeded()
-        }
-        NSApp.activate(ignoringOtherApps: true)
-
-        let status = lastState["deepseekWeb"] as? [String: Any] ?? [:]
-        let token = NSSecureTextField(string: "")
-        token.placeholderString = "DeepSeek userToken"
-        deepSeekWebTokenField = token
-        let paste = NSButton(title: text("Paste", "\u{7C98}\u{8D34}"), target: nil, action: nil)
-        paste.bezelStyle = .rounded
-        paste.target = self
-        paste.action = #selector(pasteDeepSeekToken(_:))
-        let tokenRow = NSStackView(views: [token, paste])
-        tokenRow.orientation = .horizontal
-        tokenRow.spacing = 8
-        token.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        paste.setContentHuggingPriority(.required, for: .horizontal)
-
-        let enabled = NSButton(checkboxWithTitle: text("Enable DeepSeek Web provider", "\u{542F}\u{7528} DeepSeek Web Provider"), target: nil, action: nil)
-        enabled.state = ((status["enabled"] as? Bool) == true) ? .on : .off
-
-        let stack = NSStackView(views: [tokenRow, enabled])
-        stack.orientation = .vertical
-        stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 4, left: 0, bottom: 0, right: 0)
-        stack.setFrameSize(NSSize(width: 380, height: 76))
-
-        let alert = NSAlert()
-        alert.messageText = text("Configure DeepSeek Web", "\u{914D}\u{7F6E} DeepSeek Web")
-        alert.informativeText = text(
-            "Leave token empty when enabling to auto-detect it from your local browser DeepSeek login. Paste only if auto-detect fails.",
-            "\u{542F}\u{7528}\u{65F6} token \u{7559}\u{7A7A}\u{FF0C}LocalBrain \u{4F1A}\u{81EA}\u{52A8}\u{4ECE}\u{672C}\u{673A}\u{6D4F}\u{89C8}\u{5668}\u{7684} DeepSeek \u{767B}\u{5F55}\u{7F13}\u{5B58}\u{91CC}\u{6293}\u{53D6}\u{3002}\u{81EA}\u{52A8}\u{5931}\u{8D25}\u{518D}\u{624B}\u{52A8}\u{7C98}\u{8D34}\u{3002}"
-        )
-        alert.accessoryView = stack
-        alert.addButton(withTitle: text("Save", "\u{4FDD}\u{5B58}"))
-        alert.addButton(withTitle: text("Cancel", "\u{53D6}\u{6D88}"))
-        guard alert.runModal() == .alertFirstButtonReturn else {
-            deepSeekWebTokenField = nil
-            return
-        }
-
-        let response = postJSON(url: "http://127.0.0.1:8787/brain/admin/deepseek-web-provider", body: [
-            "enabled": enabled.state == .on,
-            "userToken": token.stringValue
-        ])
-        if response == nil {
-            showAlert(title: text("DeepSeek Web was not updated", "DeepSeek Web \u{672A}\u{66F4}\u{65B0}"), message: text("Check the token and try again from the web console if needed.", "\u{8BF7}\u{68C0}\u{67E5} token\u{FF0C}\u{5FC5}\u{8981}\u{65F6}\u{4ECE}\u{7F51}\u{9875}\u{63A7}\u{5236}\u{53F0}\u{91CD}\u{8BD5}\u{3002}"))
-        }
-        deepSeekWebTokenField = nil
-        refreshState()
-    }
-
-    @objc private func pasteDeepSeekToken(_ sender: NSButton) {
-        guard let value = NSPasteboard.general.string(forType: .string),
-              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        deepSeekWebTokenField?.stringValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    @objc private func openDeepSeekWeb() {
-        NSWorkspace.shared.open(URL(string: "https://chat.deepseek.com/")!)
     }
 
     @objc private func openConsole() {
@@ -794,6 +960,16 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
     }
 
     @objc private func replaceKey() {
+        let alert = NSAlert()
+        alert.messageText = text("Reset all channel keys?", "\u{91CD}\u{7F6E}\u{5168}\u{90E8}\u{901A}\u{9053} Key\u{FF1F}")
+        alert.informativeText = text(
+            "All products using current LocalBrain keys will stop working until they are updated to the new key.",
+            "\u{6240}\u{6709}\u{6B63}\u{5728}\u{4F7F}\u{7528}\u{5F53}\u{524D} LocalBrain Key \u{7684}\u{4EA7}\u{54C1}\u{90FD}\u{4F1A}\u{5931}\u{6548}\u{FF0C}\u{9700}\u{66F4}\u{65B0}\u{5230}\u{65B0} Key \u{540E}\u{624D}\u{80FD}\u{7EE7}\u{7EED}\u{4F7F}\u{7528}\u{3002}"
+        )
+        alert.alertStyle = .critical
+        alert.addButton(withTitle: text("Reset", "\u{91CD}\u{7F6E}"))
+        alert.addButton(withTitle: text("Cancel", "\u{53D6}\u{6D88}"))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
         if !isHealthOK() {
             startServerIfNeeded()
         }
@@ -801,14 +977,47 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         refreshState()
     }
 
-    @objc private func assignKeyToCurrentModel(_ sender: NSMenuItem) {
-        guard let key = sender.representedObject as? String else { return }
-        let model = lastState["defaultModel"] as? String ?? "gpt-5.5-mini"
-        _ = postJSON(url: "http://127.0.0.1:8787/brain/admin/key-model", body: [
-            "apiKey": key,
-            "model": model
-        ])
+    @objc private func testAllChannels() {
+        let alert = NSAlert()
+        alert.messageText = text("Test all channels?", "\u{6D4B}\u{8BD5}\u{5168}\u{90E8}\u{901A}\u{9053}\u{FF1F}")
+        alert.informativeText = text(
+            "LocalBrain will call every configured channel once. This may consume paid credits, membership quota, or provider rate limits.",
+            "LocalBrain \u{4F1A}\u{628A}\u{6BCF}\u{4E2A}\u{5DF2}\u{914D}\u{7F6E}\u{901A}\u{9053}\u{90FD}\u{8C03}\u{7528}\u{4E00}\u{6B21}\u{3002}\u{8FD9}\u{53EF}\u{80FD}\u{6D88}\u{8017}\u{4ED8}\u{8D39}\u{989D}\u{5EA6}\u{3001}\u{4F1A}\u{5458}\u{989D}\u{5EA6}\u{6216}\u{89E6}\u{53D1}\u{5382}\u{5BB6}\u{9891}\u{7387}\u{9650}\u{5236}\u{3002}"
+        )
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: text("Test All", "\u{6D4B}\u{8BD5}\u{5168}\u{90E8}"))
+        alert.addButton(withTitle: text("Cancel", "\u{53D6}\u{6D88}"))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        if !isHealthOK() {
+            startServerIfNeeded()
+        }
+        _ = postJSON(url: "http://127.0.0.1:8787/brain/admin/health/test", body: ["all": true], timeout: 70.0)
         refreshState()
+    }
+
+    @objc private func testChannel(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        if !isHealthOK() {
+            startServerIfNeeded()
+        }
+        _ = postJSON(url: "http://127.0.0.1:8787/brain/admin/health/test", body: ["apiKey": key], timeout: 70.0)
+        refreshState()
+    }
+
+    @objc private func exportKeys() {
+        let rows = channelSummaries().map { channel in
+            [
+                "label": channel.label,
+                "key": channel.key,
+                "baseUrl": lastState["openAIBaseUrl"] as? String ?? "http://127.0.0.1:8787/v1",
+                "model": channel.assignedModel ?? (lastState["defaultModel"] as? String) ?? "",
+                "providerId": channel.providerId ?? "",
+                "status": channel.status
+            ]
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: rows, options: [.prettyPrinted]),
+              let text = String(data: data, encoding: .utf8) else { return }
+        copy(text)
     }
 
     @objc private func assignKeyToSelectedModel(_ sender: NSMenuItem) {
@@ -858,7 +1067,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
 
         let providerId = provider?["id"] as? String
         let name = NSTextField(string: provider?["displayName"] as? String ?? "")
-        name.placeholderString = "Provider name"
+        name.placeholderString = text("Source name", "\u{6765}\u{6E90}\u{540D}\u{79F0}")
         let baseURL = NSTextField(string: provider?["baseUrl"] as? String ?? "https://api.openai.com/v1")
         baseURL.placeholderString = "Base URL"
         upstreamBaseURLField = baseURL
@@ -1017,20 +1226,6 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         ]
     }
 
-    private func deepSeekWebStatus(state: [String: Any]) -> [String: Any] {
-        let provider = state["deepSeekWebProvider"] as? [String: Any] ?? [:]
-        let enabled = (provider["disabled"] as? Bool) == false
-        let hasToken = (provider["hasStoredUserToken"] as? Bool) == true || provider["userTokenEnv"] is String
-        let modelDetails = state["availableModelDetails"] as? [[String: Any]] ?? []
-        let modelCount = modelDetails.filter { ($0["providerId"] as? String) == "deepseek-web-local" }.count
-        return [
-            "ok": enabled && hasToken && modelCount > 0,
-            "enabled": enabled,
-            "hasToken": hasToken,
-            "modelCount": modelCount
-        ]
-    }
-
     private func isHealthOK() -> Bool {
         let json = fetchJSON(url: "http://127.0.0.1:8787/health")
         return (json?["ok"] as? Bool) == true
@@ -1050,7 +1245,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         return result
     }
 
-    private func postJSON(url: String, body: [String: Any]) -> [String: Any]? {
+    private func postJSON(url: String, body: [String: Any], timeout: TimeInterval = 10.0) -> [String: Any]? {
         guard let requestURL = URL(string: url),
               let data = try? JSONSerialization.data(withJSONObject: body) else { return nil }
         var request = URLRequest(url: requestURL)
@@ -1065,16 +1260,16 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
             result = json
         }.resume()
-        _ = sema.wait(timeout: .now() + 10.0)
+        _ = sema.wait(timeout: .now() + timeout)
         return result
     }
 
-    private func coloredItem(title: String, ok: Bool) -> NSMenuItem {
+    private func coloredItem(title: String, ok: Bool, warning: Bool = false) -> NSMenuItem {
         let item = disabledItem(title)
         item.attributedTitle = NSAttributedString(
             string: title,
             attributes: [
-                .foregroundColor: ok ? NSColor.systemGreen : NSColor.systemRed
+                .foregroundColor: ok ? NSColor.systemGreen : (warning ? NSColor.systemOrange : NSColor.systemRed)
             ]
         )
         return item
@@ -1095,6 +1290,51 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
     private func mask(_ key: String) -> String {
         if key.count < 20 { return "••••••" }
         return "\(key.prefix(14))••••••\(key.suffix(6))"
+    }
+
+    private func compactLabel(_ value: String, maxLength: Int) -> String {
+        guard value.count > maxLength, maxLength > 1 else { return value }
+        return "\(value.prefix(maxLength - 1))…"
+    }
+
+    private func intValue(_ value: Any?) -> Int? {
+        if let int = value as? Int { return int }
+        if let number = value as? NSNumber { return number.intValue }
+        if let string = value as? String { return Int(string) }
+        return nil
+    }
+
+    private func doubleValue(_ value: Any?) -> Double? {
+        if let double = value as? Double { return double }
+        if let number = value as? NSNumber { return number.doubleValue }
+        if let string = value as? String { return Double(string) }
+        return nil
+    }
+
+    private func formatDuration(_ ms: Int) -> String {
+        if ms >= 1000 {
+            let seconds = Double(ms) / 1000.0
+            return String(format: "%.1fs", seconds)
+        }
+        return "\(ms)ms"
+    }
+
+    private func formatSpeed(_ value: Double?) -> String {
+        guard let value else { return "-" }
+        return String(format: "%.1f t/s", value)
+    }
+
+    private func formatSuccessRate(_ value: Double?) -> String {
+        guard let value = normalizedSuccessRate(value) else { return "-" }
+        return "\(Int(round(value * 100)))%"
+    }
+
+    private func channelStatusDetail(_ channel: ChannelSummary) -> String {
+        let status = channelHealthText(channelHealthLevel(channel))
+        let duration = channel.durationMs.map { formatDuration($0) } ?? "-"
+        let speed = formatSpeed(channel.tokensPerSecond)
+        let success = formatSuccessRate(channel.successRate)
+        return "\(status) · \(duration) · \(speed) · \(success) · \(channel.recentPerMinute)/min"
     }
 
     private func copy(_ text: String) {

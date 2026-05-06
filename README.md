@@ -17,7 +17,6 @@ It runs on `127.0.0.1`, exposes OpenAI-style endpoints, and lets local apps use 
 - Codex ChatGPT local login provider for personal local testing
 - OpenCode local provider with dynamically discovered free model options
 - Antigravity local provider, including image generation through `/v1/images/generations`
-- DeepSeek Web experimental provider for local-only personal testing, disabled by default
 - Configurable provider boundary for future product integration
 
 ## macOS Install
@@ -26,18 +25,15 @@ Download the DMG from GitHub Releases, open it, then drag `LocalBrain.app` into 
 
 Start `LocalBrain.app`. A LocalBrain icon appears in the upper-right menu bar.
 
-The top of the menu shows live status for LocalBrain, Codex, OpenCode, and configured upstream keys. Upstream keys are shown as a summary, such as `3/4 ready`, followed by one status row per configured upstream provider.
+The menu-bar app is a lightweight observer and quick-control surface. Its top rows show LocalBrain status, channel counts, and a recommended channel, such as `3 ready · 2 unstable` and `Recommended: GPT-5.4-Mini · Codex · 2.4s`.
 
 The menu contains:
 
-- `Configure Codex`: checks whether local Codex ChatGPT login is available, and has an on/off switch for the Codex source
-- `Configure OpenCode`: opens OpenCode login/setup when the local OpenCode provider needs attention, and has an on/off switch for the OpenCode source
-- `Configure Upstream Key`: adds OpenAI-compatible upstream API keys, lists configured upstream providers, changes existing upstream keys, and has on/off switches for all upstream keys or one upstream provider
-- `Configure DeepSeek Web`: stores a local DeepSeek Web `userToken`, enables or disables the experimental DeepSeek Web source, and opens the DeepSeek web app
-- `Model`: selects the default model, including Codex models, discovered OpenCode models, and discovered OpenAI-compatible models when configured; it can filter the menu to free models only
-- `Model Sources`: enables or disables providers such as Codex and OpenCode, and can put a provider into free-only mode
-- `Key`: copies `OPENAI_BASE_URL`, copies local API keys, generates, rotates, deletes local keys, and can pin a key to a selected model
-- `Settings`: switches language, opens the web console, config file, audit log, refreshes status, or restarts/stops LocalBrain
+- `Needs Attention`: lists only abnormal or unstable channels
+- `All Channels`: lists every local channel, with usable fast channels first
+- `Common Actions`: copies `OPENAI_BASE_URL`, generates a channel, exports keys, or tests all channels with a quota warning
+- `Model Sources`: enables/disables Codex, OpenCode, Antigravity, and upstream sources, including free-only mode
+- `Advanced Settings`: changes the default fallback route, language, config/log shortcuts, service controls, and reset-all-key action
 - `Quit`: exits LocalBrain from the bottom of the main menu
 
 On first launch, LocalBrain copies its runtime files to:
@@ -60,12 +56,10 @@ OPENAI_API_KEY=<copy from LocalBrain menu: Key>
 Example model IDs:
 
 ```text
-gpt-5.5-mini
+gpt-5.4-mini
 gpt-5.5
 opencode/gpt-5-nano
 opencode/*-free
-deepseek-web/default
-deepseek-web/expert
 ```
 
 ## HTTP API
@@ -90,7 +84,7 @@ curl -X POST http://127.0.0.1:8787/v1/chat/completions \
   -H "authorization: Bearer $OPENAI_API_KEY" \
   -H "content-type: application/json" \
   -d '{
-    "model": "gpt-5.5-mini",
+    "model": "gpt-5.4-mini",
     "messages": [
       { "role": "user", "content": "Reply with OK only." }
     ]
@@ -104,7 +98,7 @@ curl -X POST http://127.0.0.1:8787/v1/responses \
   -H "authorization: Bearer $OPENAI_API_KEY" \
   -H "content-type: application/json" \
   -d '{
-    "model": "gpt-5.5-mini",
+    "model": "gpt-5.4-mini",
     "input": "Reply with OK only."
   }'
 ```
@@ -130,13 +124,13 @@ Open the local console:
 http://127.0.0.1:8787/
 ```
 
-Use the bilingual console or the menu-bar `Configure Upstream Key` item to add or change another upstream API key. Local apps still use LocalBrain's own `OPENAI_BASE_URL` and local proxy key; LocalBrain stores the upstream key in the local config file and uses it when routing to that provider. Upstream model choices are fetched from the upstream `/models` endpoint instead of being hardcoded. The macOS menu marks each configured upstream provider green when it is enabled and exposes at least one discovered model, or red when it is off or unavailable.
+Use the bilingual console or the menu-bar `Model Sources > Upstream Key` item to add or change an upstream API key. Local apps still use LocalBrain's own `OPENAI_BASE_URL` and local proxy key; LocalBrain stores the upstream key in the local config file and uses it when routing to that provider. Upstream model choices are fetched from the upstream `/models` endpoint instead of being hardcoded.
 
 Each local proxy key can also be assigned to a model from the console. When a key is assigned, LocalBrain forces requests made with that key to use the assigned model, even if the client sends a different `model` value. Calling `/v1/models` with that key returns only the assigned model, which makes the key suitable for giving one product one stable model route.
 
-Use `Model Sources`, or the switches under `Configure Codex`, `Configure OpenCode`, and `Configure Upstream Key`, to decide which providers LocalBrain is allowed to use. For example, turn off Codex and upstream keys, then choose OpenCode's `Use Only This Free Source` action when you want LocalBrain to expose and route only OpenCode models marked as free. Requests for disallowed models are moved to the first allowed model instead of escaping the filter.
+The console is organized around `Channel Management`. Each local proxy key is treated as one channel and stays compact on a single row with its source, assigned model, health status, latency, speed, and success rate. Expand a channel only when you need to rename it, inspect the full key/model, clear routing, or delete it. `Chat & Speed` keeps the quick chat tester and visible-model benchmark together, while model sources, upstream keys, and raw model lists live in collapsible advanced sections.
 
-DeepSeek Web support is intentionally marked experimental and stays off until you enable it. To try it, open `https://chat.deepseek.com/` in a local browser and sign in once, then enable `DeepSeek Web Experimental` from the web console or `Configure DeepSeek Web` from the menu bar. If the token box is empty, LocalBrain attempts to auto-detect `userToken` from local browser storage. LocalBrain stores that token only in the local config and exposes free model IDs such as `deepseek-web/default`, `deepseek-web/expert`, and their search variants. If the web session expires, captcha appears, or DeepSeek changes its private web API, this provider may stop until you refresh the token or disable it again.
+Use `Model Sources` to decide which providers LocalBrain is allowed to use. For example, turn off Codex and upstream keys, then choose OpenCode's free-only action when you want LocalBrain to expose and route only OpenCode models marked as free. Requests for disallowed models are moved to the first allowed model instead of escaping the filter.
 
 List only free models through the OpenAI-compatible models endpoint:
 
@@ -188,7 +182,6 @@ LocalBrain is intended for local personal testing and development.
 - It asks OpenAI-compatible upstreams for their current `/models` list when an API key is configured.
 - It asks the OpenCode CLI for available free models when the OpenCode provider is configured.
 - It uses the OpenCode CLI directly for OpenCode requests, with local server mode kept as a fallback.
-- It can store a DeepSeek Web `userToken` locally only when the experimental DeepSeek Web provider is manually enabled.
 - Codex/ChatGPT subscription-backed behavior is for local testing, not for production redistribution.
 
 Production apps should depend on the LocalBrain protocol boundary or an approved provider, not on personal subscription login behavior.
@@ -224,24 +217,21 @@ macOS 使用方式：
 3. 启动 `LocalBrain.app`。
 4. 在右上角菜单栏中配置 Codex / OpenCode、选择模型、复制本地 Key。
 
-菜单顶部会显示 LocalBrain、Codex、OpenCode 和已配置上游 Key 的实时状态。上游 Key 会先显示汇总，例如 `3/4 可用`，然后按厂家逐行显示绿色可用或红色不可用/已关闭。
+菜单栏应用是轻量观察和快捷操作入口。顶部显示运行状态、通道数量和推荐通道，例如 `3 可用 · 2 不稳定`，下一行显示 `推荐：GPT-5.4-Mini · Codex · 2.4s`。
 
 菜单包含：
 
-- `Configure Codex`：检查本机 Codex ChatGPT 登录态，并可用一级菜单中的开关单独停用/启用 Codex 来源
-- `Configure OpenCode`：检查或打开本机 OpenCode 配置，并可用一级菜单中的开关单独停用/启用 OpenCode 来源
-- `Configure Upstream Key` / `配置上游 Key`：添加 OpenAI-compatible 上游 API Key，查看已添加的厂家，更改已有上游 Key，并可整体或按厂家停用/启用上游 Key
-- `Configure DeepSeek Web` / `配置 DeepSeek Web`：粘贴 DeepSeek 网页 LocalStorage 里的 `userToken`，手动启用或关闭 DeepSeek Web 实验 Provider，也可打开 DeepSeek 网页
-- `Model`：选择默认模型，包含 Codex、OpenCode 和 OpenAI-compatible 上游模型，并可只显示免费模型
-- `Model Sources`：按 provider 控制模型来源，可关闭 Codex/OpenCode/上游 API，也可只允许某个来源的免费模型
-- `Key`：复制 `OPENAI_BASE_URL`、复制/生成/替换/删除本地 API Key，并给每个本地 Key 指定固定模型
-- `Settings`：切换中英文、打开控制台、配置文件、审计日志，或重启/停止 LocalBrain
+- `需要处理`：只显示异常或不稳定通道
+- `全部通道`：显示全部本地通道，可用且更快的通道排在前面
+- `常用操作`：复制 Base URL、生成新通道、导出全部 Key、测试全部通道
+- `模型来源`：控制 Codex、OpenCode、Antigravity 和上游来源，可启用/停用或只用免费模型
+- `高级设置`：默认备用路由、语言、配置文件、审计日志、重启/停止服务和重置全部通道 Key
 - `Quit`：退出 LocalBrain，位于主菜单最底部
 
-本地 Key 可以绑定到指定模型。产品侧只需要使用不同的 LocalBrain Key，LocalBrain 会自动把请求固定路由到对应模型；如果开启了 `Model Sources` 或一级配置菜单里的开关，请求会被限制在允许的模型范围内。例如只想用 OpenCode 免费模型时，关闭 Codex 和上游 Key，只保留 OpenCode，并对 OpenCode 选择“只用这个免费来源”。
+本地 Key 可以绑定到指定模型。产品侧只需要使用不同的 LocalBrain Key，LocalBrain 会自动把请求固定路由到对应模型；如果开启了 `模型来源` 里的开关，请求会被限制在允许的模型范围内。例如只想用 OpenCode 免费模型时，关闭 Codex 和上游 Key，只保留 OpenCode，并对 OpenCode 选择“只用免费模型”。
 
 控制台支持中英文切换。添加上游 Key 时，先填写 Base URL 和 API Key，然后点击“拉取模型”，LocalBrain 会从上游 `/models` 接口获取模型列表供选择。
 
-DeepSeek Web Provider 只用于本机个人尝试，默认关闭。启用方式是先在本机浏览器登录 `https://chat.deepseek.com/`，然后在控制台的 `DeepSeek Web 实验 Provider` 或菜单栏的 `配置 DeepSeek Web` 里勾选启用；token 输入框留空时，LocalBrain 会自动从浏览器本地缓存里抓取 `userToken`。启用后会显示 `deepseek-web/default`、`deepseek-web/expert` 等免费模型；如果网页登录过期、出现人机验证，或 DeepSeek 改了网页私有接口，需要重新登录、重新启用或先关闭该来源。
+控制台现在以 `通道管理` 为核心：每个本地 Key 就是一条通道，默认一行显示名称、来源、指定模型、状态、耗时、速度和成功率；需要改名、看完整 Key/模型、清除路由或删除时再展开。`试聊与测速` 放在通道管理下面，用于快速对话和测试当前可见模型；模型来源、上游 Key、完整模型列表等低频内容折叠进高级区域。自动体检仍支持 5/10/30 分钟间隔刷新通道状态。
 
 本项目适合本地个人测试。Codex/ChatGPT 本地订阅模式不建议用于正式产品发布。

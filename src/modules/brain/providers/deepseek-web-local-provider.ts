@@ -33,11 +33,17 @@ interface DeepSeekApiEnvelope<T = unknown> {
 
 interface DeepSeekCurrentUserData {
   token?: string;
+  biz_data?: {
+    token?: string;
+  };
 }
 
 interface DeepSeekSessionData {
   biz_data?: {
     id?: string;
+    chat_session?: {
+      id?: string;
+    };
   };
 }
 
@@ -57,6 +63,10 @@ interface DeepSeekChallenge {
 }
 
 interface DeepSeekStreamEvent {
+  response_message_id?: number | string;
+  p?: string;
+  o?: string;
+  v?: unknown;
   message_id?: number | string;
   choices?: Array<{
     delta?: {
@@ -69,6 +79,18 @@ interface DeepSeekStreamEvent {
     };
     finish_reason?: string | null;
   }>;
+}
+
+interface DeepSeekPatchResponse {
+  response?: {
+    message_id?: number | string;
+    content?: string;
+    thinking_content?: string | null;
+    fragments?: Array<{
+      type?: string;
+      content?: string;
+    }>;
+  };
 }
 
 interface CachedAccessToken {
@@ -102,7 +124,8 @@ const FAKE_HEADERS: Record<string, string> = {
   'x-app-version': '20241129.1',
   'x-client-locale': 'zh-CN',
   'x-client-platform': 'web',
-  'x-client-version': '1.0.0-always',
+  'x-client-timezone-offset': '28800',
+  'x-client-version': '2.0.0',
 };
 
 export class DeepSeekWebLocalProvider implements BrainProvider {
@@ -261,7 +284,7 @@ export class DeepSeekWebLocalProvider implements BrainProvider {
       timeoutMs: 15_000,
     });
     const data = await readDeepSeekJson<DeepSeekSessionData>(response, 'create session');
-    const sessionId = data.biz_data?.id;
+    const sessionId = data.biz_data?.id ?? data.biz_data?.chat_session?.id;
     if (!sessionId) {
       throw new Error('DeepSeek Web did not return a chat session id');
     }
@@ -327,20 +350,21 @@ export class DeepSeekWebLocalProvider implements BrainProvider {
       timeoutMs: 15_000,
     });
     const data = await readDeepSeekJson<DeepSeekCurrentUserData>(response, 'refresh user token');
-    if (!data.token) {
+    const token = data.token ?? data.biz_data?.token;
+    if (!token) {
       throw new Error('DeepSeek Web token refresh did not return an access token');
     }
     this.accessToken = {
-      token: data.token,
+      token,
       expiresAt: Date.now() + ACCESS_TOKEN_TTL_MS,
     };
-    return data.token;
+    return token;
   }
 
   private async resolveUserToken(): Promise<string> {
-    const token = this.userToken
+    const token = normalizeUserToken(this.userToken
       ?? (this.userTokenEnv ? process.env[this.userTokenEnv] : undefined)
-      ?? (this.userTokenPath ? (await readFile(expandHome(this.userTokenPath), 'utf8')).trim() : undefined);
+      ?? (this.userTokenPath ? (await readFile(expandHome(this.userTokenPath), 'utf8')).trim() : undefined));
     if (!token) {
       throw new Error('DeepSeek Web provider requires a local userToken. Copy userToken from chat.deepseek.com LocalStorage into LocalBrain first.');
     }
@@ -436,6 +460,42 @@ async function collectDeepSeekSse(response: Response): Promise<{
         continue;
       }
       const event = JSON.parse(data) as DeepSeekStreamEvent;
+      if (event.response_message_id !== undefined) {
+        messageId = event.response_message_id;
+      }
+
+      if (typeof event.p === 'string') {
+        const value = typeof event.v === 'string' ? event.v.replace(/\[citation:\d+\]/g, '') : '';
+        if (event.p === 'response/content') {
+          content = event.o === 'APPEND' ? content + value : value;
+        } else if (event.p === 'response/thinking_content') {
+          reasoningContent = event.o === 'APPEND' ? reasoningContent + value : value;
+        }
+        continue;
+      }
+
+      if (event.v && typeof event.v === 'object') {
+        const patch = event.v as DeepSeekPatchResponse;
+        if (patch.response) {
+          messageId = patch.response.message_id ?? messageId;
+          if (typeof patch.response.content === 'string' && patch.response.content.length > content.length) {
+            content = patch.response.content.replace(/\[citation:\d+\]/g, '');
+          }
+          if (typeof patch.response.thinking_content === 'string' && patch.response.thinking_content.length > reasoningContent.length) {
+            reasoningContent = patch.response.thinking_content;
+          }
+          if (Array.isArray(patch.response.fragments)) {
+            const fragmentContent = patch.response.fragments
+              .filter((fragment) => fragment.type === undefined || fragment.type === 'RESPONSE')
+              .map((fragment) => fragment.content?.replace(/\[citation:\d+\]/g, '') ?? '')
+              .join('');
+            if (fragmentContent.length > content.length) {
+              content = fragmentContent;
+            }
+          }
+        }
+      }
+
       const choice = event.choices?.[0];
       const delta = choice?.delta;
       if (!delta) {
@@ -582,6 +642,22 @@ function expandHome(value: string): string {
     return path.join(os.homedir(), value.slice(2));
   }
   return value;
+}
+
+function normalizeUserToken(value: string | undefined): string | undefined {
+  const cleaned = value?.trim();
+  if (!cleaned) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(cleaned) as { value?: unknown };
+    if (typeof parsed.value === 'string' && parsed.value.trim()) {
+      return parsed.value.trim();
+    }
+  } catch {
+    // Chrome LocalStorage may store either the raw token or a JSON wrapper.
+  }
+  return cleaned;
 }
 
 function preview(value: string): string {

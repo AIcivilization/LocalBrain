@@ -177,7 +177,7 @@ curl -X POST http://127.0.0.1:8787/v1/chat/completions \
   -H "authorization: Bearer $OPENAI_API_KEY" \
   -H "content-type: application/json" \
   -d '{
-    "model": "gpt-5.5-mini",
+    "model": "gpt-5.4-mini",
     "messages": [
       { "role": "user", "content": "Reply with OK only." }
     ]
@@ -327,7 +327,7 @@ On first launch, `LocalBrain.app` copies the runtime into:
 The menu contains:
 
 - `Configure Codex`: checks local Codex ChatGPT login status
-- `Model`: selects the default model, currently `gpt-5.5-mini` or `gpt-5.5`
+- `Model`: selects the default model, currently `gpt-5.4-mini` or `gpt-5.5`
 - `Key`: shows/copies local API keys and `OPENAI_BASE_URL`
 - `Settings`: switches language, opens console/config/audit log, refreshes status, or restarts/stops service
 - `Quit`: exits LocalBrain from the bottom of the main menu
@@ -339,8 +339,8 @@ Default Codex config:
 ```json
 {
   "defaultProvider": "codex-chatgpt-local",
-  "defaultModel": "gpt-5.5-mini",
-  "models": ["gpt-5.5-mini", "gpt-5.5"]
+  "defaultModel": "gpt-5.4-mini",
+  "models": ["gpt-5.4-mini", "gpt-5.5"]
 }
 ```
 

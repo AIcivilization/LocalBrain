@@ -1,6 +1,6 @@
 {
   "name": "local-brain",
-  "version": "1.1.1",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "description": "Local OpenAI-compatible brain gateway backed by local providers such as Codex ChatGPT login.",
@@ -17,6 +17,7 @@
     "brain-server": "node --experimental-strip-types src/tools/brain-server.ts",
     "brain-start": "node --experimental-strip-types src/tools/brain-start.ts",
     "build-app": "zsh scripts/build-menubar-app.sh",
-    "package-dmg": "zsh scripts/package-dmg.sh"
+    "package-dmg": "zsh scripts/package-dmg.sh",
+    "release": "zsh scripts/release.sh"
   }
 }

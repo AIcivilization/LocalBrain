@@ -1,11 +1,10 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { appendFile, mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
 import { registerConfiguredProvider } from './config.ts';
-import { DeepSeekWebLocalProvider } from './providers/deepseek-web-local-provider.ts';
 import type { BrainConfig, BrainModelDescriptor, BrainProductRequest, BrainProviderConfig, BrainServerConfig } from './types.ts';
 import type { BrainRuntime } from './brain-runtime.ts';
 import type { BrainProviderRegistry } from './provider-registry.ts';
@@ -50,6 +49,11 @@ interface LocalApiKeyDeleteRequest {
   apiKey?: string;
 }
 
+interface LocalApiKeyLabelRequest {
+  apiKey?: string;
+  label?: string;
+}
+
 interface ProviderModelFilterRequest {
   providerId?: string;
   enabled?: boolean;
@@ -57,9 +61,67 @@ interface ProviderModelFilterRequest {
   only?: boolean;
 }
 
-interface DeepSeekWebProviderRequest {
+interface BrainHealthTestRequest {
+  apiKey?: string;
+  model?: string;
+  input?: string;
+  all?: boolean;
+}
+
+interface BrainModelSpeedTestRequest {
+  apiKey?: string;
+  input?: string;
+  freeOnly?: boolean;
+  models?: string[];
+}
+
+interface AutoHealthRequest {
   enabled?: boolean;
-  userToken?: string;
+  intervalMs?: number;
+}
+
+interface BrainHealthMetric {
+  timestamp: string;
+  apiKeyFingerprint: string;
+  providerId?: string;
+  model?: string;
+  ok: boolean;
+  durationMs: number;
+  outputTokens: number;
+  tokensPerSecond: number;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+interface BrainModelMetric {
+  timestamp: string;
+  apiKeyFingerprint: string;
+  providerId?: string;
+  model: string;
+  modelName?: string;
+  ok: boolean;
+  durationMs: number;
+  outputTokens: number;
+  tokensPerSecond: number;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+interface BrainRequestLogEntry {
+  timestamp: string;
+  apiKeyFingerprint: string;
+  apiKeyLabel?: string;
+  path: string;
+  providerId?: string;
+  model?: string;
+  ok: boolean;
+  durationMs: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  tokensPerSecond?: number;
+  errorCode?: string;
+  errorMessage?: string;
 }
 
 interface OpenAIImageGenerationRequest {
@@ -75,11 +137,19 @@ interface OpenAIImageGenerationRequest {
 export class BrainServer {
   private readonly options: BrainServerOptions;
   private readonly serverConfig: BrainServerConfig;
+  private readonly healthMetrics: BrainHealthMetric[] = [];
+  private readonly modelMetrics: BrainModelMetric[] = [];
+  private readonly requestLogs: BrainRequestLogEntry[] = [];
+  private readonly metricsLogPath?: string;
+  private readonly requestLogPath?: string;
+  private autoHealthTimer?: ReturnType<typeof setInterval>;
   private server?: Server;
 
   constructor(options: BrainServerOptions) {
     this.options = options;
     this.serverConfig = normalizeServerConfig(options.config.server);
+    this.metricsLogPath = resolveMetricsLogPath(options.configPath, this.serverConfig.auditLogPath);
+    this.requestLogPath = resolveRequestLogPath(options.configPath, this.serverConfig.auditLogPath);
   }
 
   async listen(): Promise<void> {
@@ -100,6 +170,8 @@ export class BrainServer {
         resolve();
       });
     });
+    await this.loadPersistedMetrics();
+    this.configureAutoHealthTimer();
   }
 
   async close(): Promise<void> {
@@ -109,6 +181,10 @@ export class BrainServer {
 
     const server = this.server;
     this.server = undefined;
+    if (this.autoHealthTimer) {
+      clearInterval(this.autoHealthTimer);
+      this.autoHealthTimer = undefined;
+    }
     await new Promise<void>((resolve, reject) => {
       server.close((error) => {
         if (error) {
@@ -184,6 +260,17 @@ export class BrainServer {
       return;
     }
 
+    if (method === 'POST' && path === '/brain/admin/key-label') {
+      const body = await this.readJson<LocalApiKeyLabelRequest>(request);
+      await this.setLocalApiKeyLabel(body);
+      this.writeJson(response, 200, {
+        ok: true,
+        state: await this.localState(),
+      });
+      await this.audit(method, path, 200, startedAt);
+      return;
+    }
+
     if (method === 'POST' && path === '/brain/admin/model') {
       const body = await this.readJson<{ model?: string }>(request);
       await this.setDefaultModel(body.model);
@@ -240,9 +327,51 @@ export class BrainServer {
       return;
     }
 
-    if (method === 'POST' && path === '/brain/admin/deepseek-web-provider') {
-      const body = await this.readJson<DeepSeekWebProviderRequest>(request);
-      await this.setDeepSeekWebProvider(body);
+    if (method === 'GET' && path === '/brain/admin/health') {
+      this.writeJson(response, 200, {
+        ok: true,
+        health: await this.keyHealthSnapshot(),
+      });
+      await this.audit(method, path, 200, startedAt);
+      return;
+    }
+
+    if (method === 'POST' && path === '/brain/admin/health/test') {
+      const body = await this.readJson<BrainHealthTestRequest>(request);
+      const result = await this.runHealthTest(body);
+      this.writeJson(response, 200, {
+        ok: true,
+        ...result,
+        health: await this.keyHealthSnapshot(),
+      });
+      await this.audit(method, path, 200, startedAt);
+      return;
+    }
+
+    if (method === 'POST' && path === '/brain/admin/model-speed-test') {
+      const body = await this.readJson<BrainModelSpeedTestRequest>(request);
+      const result = await this.runModelSpeedTest(body);
+      this.writeJson(response, 200, {
+        ok: true,
+        ...result,
+        modelSpeed: this.modelSpeedSnapshot(),
+      });
+      await this.audit(method, path, 200, startedAt);
+      return;
+    }
+
+    if (method === 'GET' && path === '/brain/admin/request-log') {
+      this.writeJson(response, 200, {
+        ok: true,
+        logs: this.requestLogs.slice(-100).reverse(),
+      });
+      await this.audit(method, path, 200, startedAt);
+      return;
+    }
+
+    if (method === 'POST' && path === '/brain/admin/auto-health') {
+      const body = await this.readJson<AutoHealthRequest>(request);
+      await this.setAutoHealth(body);
       this.writeJson(response, 200, {
         ok: true,
         state: await this.localState(),
@@ -270,38 +399,65 @@ export class BrainServer {
 
     if (method === 'POST' && path === '/brain/run') {
       const body = await this.readJson<BrainProductRequest>(request);
-      const result = await this.options.runtime.run(await this.constrainToAllowedModels(this.applyLocalApiKeyRoute(body, localApiKey)));
-      this.writeJson(response, 200, result);
-      await this.audit(method, path, 200, startedAt, result.providerId, result.model);
+      try {
+        const result = await this.options.runtime.run(await this.constrainToAllowedModels(this.applyLocalApiKeyRoute(body, localApiKey)));
+        await this.recordRequestLogFromResult(localApiKey, path, startedAt, true, result.providerId, result.model, result.usage);
+        this.writeJson(response, 200, result);
+        await this.audit(method, path, 200, startedAt, result.providerId, result.model);
+      } catch (error) {
+        await this.recordRequestLogError(localApiKey, path, startedAt, error, body.providerId, body.model);
+        throw error;
+      }
       return;
     }
 
     if (method === 'POST' && path === '/v1/chat/completions') {
       const body = await this.readJson<Record<string, unknown>>(request);
-      const result = await this.options.runtime.run(await this.constrainToAllowedModels(this.applyLocalApiKeyRoute(openAIChatToBrainRequest(body), localApiKey)));
-      if (body.stream === true) {
-        this.writeSse(response, brainToOpenAIChatStreamChunks(result));
+      const brainRequest = openAIChatToBrainRequest(body);
+      try {
+        const result = await this.options.runtime.run(await this.constrainToAllowedModels(this.applyLocalApiKeyRoute(brainRequest, localApiKey)));
+        await this.recordRequestLogFromResult(localApiKey, path, startedAt, true, result.providerId, result.model, result.usage);
+        if (body.stream === true) {
+          this.writeSse(response, brainToOpenAIChatStreamChunks(result));
+          await this.audit(method, path, 200, startedAt, result.providerId, result.model);
+          return;
+        }
+        this.writeJson(response, 200, brainToOpenAIChatCompletion(result));
         await this.audit(method, path, 200, startedAt, result.providerId, result.model);
-        return;
+      } catch (error) {
+        await this.recordRequestLogError(localApiKey, path, startedAt, error, brainRequest.providerId, brainRequest.model);
+        throw error;
       }
-      this.writeJson(response, 200, brainToOpenAIChatCompletion(result));
-      await this.audit(method, path, 200, startedAt, result.providerId, result.model);
       return;
     }
 
     if (method === 'POST' && path === '/v1/images/generations') {
       const body = await this.readJson<OpenAIImageGenerationRequest>(request);
-      const result = await this.generateImage(body, localApiKey);
-      this.writeJson(response, 200, result);
-      await this.audit(method, path, 200, startedAt, result.brain.providerId, result.brain.model);
+      try {
+        const result = await this.generateImage(body, localApiKey);
+        const brain = result.brain as { providerId?: string; model?: string } | undefined;
+        await this.recordRequestLogFromResult(localApiKey, path, startedAt, true, brain?.providerId, brain?.model);
+        this.writeJson(response, 200, result);
+        await this.audit(method, path, 200, startedAt, brain?.providerId, brain?.model);
+      } catch (error) {
+        await this.recordRequestLogError(localApiKey, path, startedAt, error, undefined, body.model);
+        throw error;
+      }
       return;
     }
 
     if (method === 'POST' && path === '/v1/responses') {
       const body = await this.readJson<Record<string, unknown>>(request);
-      const result = await this.options.runtime.run(await this.constrainToAllowedModels(this.applyLocalApiKeyRoute(openAIResponsesToBrainRequest(body), localApiKey)));
-      this.writeJson(response, 200, brainToOpenAIResponse(result));
-      await this.audit(method, path, 200, startedAt, result.providerId, result.model);
+      const brainRequest = openAIResponsesToBrainRequest(body);
+      try {
+        const result = await this.options.runtime.run(await this.constrainToAllowedModels(this.applyLocalApiKeyRoute(brainRequest, localApiKey)));
+        await this.recordRequestLogFromResult(localApiKey, path, startedAt, true, result.providerId, result.model, result.usage);
+        this.writeJson(response, 200, brainToOpenAIResponse(result));
+        await this.audit(method, path, 200, startedAt, result.providerId, result.model);
+      } catch (error) {
+        await this.recordRequestLogError(localApiKey, path, startedAt, error, brainRequest.providerId, brainRequest.model);
+        throw error;
+      }
       return;
     }
 
@@ -415,12 +571,375 @@ export class BrainServer {
     await appendFile(this.serverConfig.auditLogPath, `${JSON.stringify(entry)}\n`, 'utf8');
   }
 
+  private async keyHealthSnapshot(): Promise<Array<Record<string, unknown>>> {
+    const now = Date.now();
+    return this.serverConfig.apiKeys.map((apiKey) => {
+      const fingerprint = fingerprintApiKey(apiKey);
+      const route = this.serverConfig.apiKeyRoutes?.[apiKey];
+      const records = this.healthMetrics.filter((metric) => metric.apiKeyFingerprint === fingerprint);
+      const latest = records[records.length - 1];
+      const recent = records.filter((metric) => now - Date.parse(metric.timestamp) <= 60 * 60 * 1000);
+      const recentWindow = recent.length > 0 ? recent : records.slice(-20);
+      const successes = recentWindow.filter((metric) => metric.ok);
+      const recentOneMinute = records.filter((metric) => now - Date.parse(metric.timestamp) <= 60 * 1000);
+      const recentErrors = recentWindow.filter((metric) => !metric.ok);
+      return {
+        apiKey,
+        apiKeyFingerprint: fingerprint,
+        route,
+        status: latest ? (latest.ok ? 'ok' : 'error') : 'unknown',
+        lastTestAt: latest?.timestamp,
+        providerId: latest?.providerId ?? route?.providerId,
+        model: latest?.model ?? route?.model ?? this.options.config.defaultModel,
+        durationMs: latest?.durationMs,
+        firstTokenMs: latest?.durationMs,
+        outputTokens: latest?.outputTokens,
+        tokensPerSecond: latest?.tokensPerSecond,
+        successRate: recentWindow.length > 0 ? successes.length / recentWindow.length : undefined,
+        recentCount: recentWindow.length,
+        recentPerMinute: recentOneMinute.length,
+        recentErrors: recentErrors.length,
+        errorCode: latest?.errorCode,
+        errorMessage: latest?.errorMessage,
+      };
+    });
+  }
+
+  private async runHealthTest(body: BrainHealthTestRequest): Promise<Record<string, unknown>> {
+    const requestedKey = body.apiKey?.trim();
+    const keys = body.all === true
+      ? this.serverConfig.apiKeys
+      : requestedKey
+        ? [requestedKey]
+        : this.serverConfig.apiKeys.slice(0, 1);
+    if (keys.length === 0) {
+      throw new Error('no local API keys are configured');
+    }
+    for (const apiKey of keys) {
+      if (!this.serverConfig.apiKeys.includes(apiKey)) {
+        throw new Error('apiKey must be an existing local API key');
+      }
+    }
+
+    const results = await Promise.all(keys.map((apiKey) => this.runSingleHealthTest(apiKey, body)));
+    return {
+      results,
+    };
+  }
+
+  private async runSingleHealthTest(apiKey: string, body: BrainHealthTestRequest): Promise<Record<string, unknown>> {
+    const startedAt = Date.now();
+    const input = body.input?.trim() || '请只回复 OK';
+    let providerId: string | undefined;
+    let model: string | undefined;
+    try {
+      const baseRequest: BrainProductRequest = {
+        input,
+        taskKind: 'chat',
+        session: {
+          sessionId: `health-${fingerprintApiKey(apiKey)}`,
+          messages: [],
+        },
+        appContext: {
+          productName: 'LocalBrain',
+          surface: 'health-test',
+        },
+        metadata: {
+          localBrainHealthTest: true,
+          localBrainTestTimeoutMs: 45_000,
+        },
+      };
+      let routed = this.applyLocalApiKeyRoute(baseRequest, apiKey);
+      const selectedModel = body.model?.trim();
+      if (selectedModel) {
+        const descriptor = (await this.availableModelDescriptors()).find((candidate) => candidate.id === selectedModel);
+        routed = {
+          ...routed,
+          model: selectedModel,
+          providerId: descriptor?.providerId ?? routed.providerId,
+        };
+      }
+      const constrained = await this.constrainToAllowedModels(routed);
+      const result = await this.options.runtime.run(constrained);
+      providerId = result.providerId;
+      model = result.model;
+      const durationMs = Date.now() - startedAt;
+      const outputTokens = result.usage?.outputTokens ?? result.message.content.length;
+      const metric = await this.recordHealthMetric({
+        timestamp: new Date().toISOString(),
+        apiKeyFingerprint: fingerprintApiKey(apiKey),
+        providerId,
+        model,
+        ok: true,
+        durationMs,
+        outputTokens,
+        tokensPerSecond: tokensPerSecond(outputTokens, durationMs),
+      });
+      return {
+        ...metric,
+        apiKey,
+        reply: result.message.content,
+        finishReason: result.finishReason,
+      };
+    } catch (error) {
+      const durationMs = Date.now() - startedAt;
+      const metric = await this.recordHealthMetric({
+        timestamp: new Date().toISOString(),
+        apiKeyFingerprint: fingerprintApiKey(apiKey),
+        providerId,
+        model: model ?? body.model?.trim() ?? this.serverConfig.apiKeyRoutes?.[apiKey]?.model,
+        ok: false,
+        durationMs,
+        outputTokens: 0,
+        tokensPerSecond: 0,
+        errorCode: errorToCode(error),
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+      return {
+        ...metric,
+        apiKey,
+      };
+    }
+  }
+
+  private async recordHealthMetric(metric: BrainHealthMetric): Promise<BrainHealthMetric> {
+    this.healthMetrics.push(metric);
+    if (this.healthMetrics.length > 500) {
+      this.healthMetrics.splice(0, this.healthMetrics.length - 500);
+    }
+    if (this.metricsLogPath) {
+      await mkdir(path.dirname(this.metricsLogPath), { recursive: true });
+      await appendFile(this.metricsLogPath, `${JSON.stringify(metric)}\n`, 'utf8').catch(() => undefined);
+    }
+    return metric;
+  }
+
+  private modelSpeedSnapshot(): BrainModelMetric[] {
+    const latestByModel = new Map<string, BrainModelMetric>();
+    for (const metric of this.modelMetrics) {
+      latestByModel.set(metric.model, metric);
+    }
+    return [...latestByModel.values()]
+      .sort((left, right) => {
+        if (left.ok !== right.ok) {
+          return left.ok ? -1 : 1;
+        }
+        return left.durationMs - right.durationMs;
+      });
+  }
+
+  private async runModelSpeedTest(body: BrainModelSpeedTestRequest): Promise<Record<string, unknown>> {
+    const apiKey = body.apiKey?.trim() || this.serverConfig.apiKeys[0];
+    if (!apiKey || !this.serverConfig.apiKeys.includes(apiKey)) {
+      throw new Error('apiKey must be an existing local API key');
+    }
+
+    const visibleModels = await this.availableModelDescriptors(body.freeOnly === true);
+    const requested = new Set((body.models ?? []).map((model) => model.trim()).filter(Boolean));
+    const models = requested.size > 0
+      ? visibleModels.filter((model) => requested.has(model.id))
+      : visibleModels;
+    if (models.length === 0) {
+      throw new Error('no visible models to test');
+    }
+
+    const results: BrainModelMetric[] = [];
+    for (const model of models) {
+      results.push(await this.runSingleModelSpeedTest(apiKey, model, body.input));
+    }
+
+    return {
+      results: results.sort((left, right) => {
+        if (left.ok !== right.ok) {
+          return left.ok ? -1 : 1;
+        }
+        return left.durationMs - right.durationMs;
+      }),
+    };
+  }
+
+  private async runSingleModelSpeedTest(
+    apiKey: string,
+    model: BrainModelDescriptor,
+    input?: string,
+  ): Promise<BrainModelMetric> {
+    const startedAt = Date.now();
+    try {
+      const result = await this.options.runtime.run(await this.constrainToAllowedModels({
+        input: input?.trim() || '请只回复 OK',
+        taskKind: 'chat',
+        model: model.id,
+        providerId: model.providerId,
+        session: {
+          sessionId: `model-speed-${fingerprintApiKey(apiKey)}-${model.id}`,
+          messages: [],
+        },
+        appContext: {
+          productName: 'LocalBrain',
+          surface: 'model-speed-test',
+        },
+        metadata: {
+          localBrainModelSpeedTest: true,
+          localBrainTestTimeoutMs: 45_000,
+        },
+      }));
+      const durationMs = Date.now() - startedAt;
+      const outputTokens = result.usage?.outputTokens ?? result.message.content.length;
+      return await this.recordModelMetric({
+        timestamp: new Date().toISOString(),
+        apiKeyFingerprint: fingerprintApiKey(apiKey),
+        providerId: result.providerId,
+        model: result.model,
+        modelName: model.displayName ?? result.model,
+        ok: true,
+        durationMs,
+        outputTokens,
+        tokensPerSecond: tokensPerSecond(outputTokens, durationMs),
+      });
+    } catch (error) {
+      return await this.recordModelMetric({
+        timestamp: new Date().toISOString(),
+        apiKeyFingerprint: fingerprintApiKey(apiKey),
+        providerId: model.providerId,
+        model: model.id,
+        modelName: model.displayName ?? model.id,
+        ok: false,
+        durationMs: Date.now() - startedAt,
+        outputTokens: 0,
+        tokensPerSecond: 0,
+        errorCode: errorToCode(error),
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private async recordModelMetric(metric: BrainModelMetric): Promise<BrainModelMetric> {
+    this.modelMetrics.push(metric);
+    if (this.modelMetrics.length > 500) {
+      this.modelMetrics.splice(0, this.modelMetrics.length - 500);
+    }
+    if (this.metricsLogPath) {
+      await mkdir(path.dirname(this.metricsLogPath), { recursive: true });
+      await appendFile(this.metricsLogPath, `${JSON.stringify({ type: 'model-speed', ...metric })}\n`, 'utf8').catch(() => undefined);
+    }
+    return metric;
+  }
+
+  private async recordRequestLogFromResult(
+    apiKey: string,
+    routePath: string,
+    startedAt: number,
+    ok: boolean,
+    providerId?: string,
+    model?: string,
+    usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number },
+  ): Promise<void> {
+    await this.recordRequestLog({
+      timestamp: new Date().toISOString(),
+      apiKeyFingerprint: fingerprintApiKey(apiKey),
+      apiKeyLabel: this.serverConfig.apiKeyLabels?.[apiKey],
+      path: routePath,
+      providerId,
+      model,
+      ok,
+      durationMs: Date.now() - startedAt,
+      inputTokens: usage?.inputTokens,
+      outputTokens: usage?.outputTokens,
+      totalTokens: usage?.totalTokens,
+      tokensPerSecond: tokensPerSecond(usage?.outputTokens ?? 0, Date.now() - startedAt),
+    });
+  }
+
+  private async recordRequestLogError(
+    apiKey: string,
+    routePath: string,
+    startedAt: number,
+    error: unknown,
+    providerId?: string,
+    model?: string,
+  ): Promise<void> {
+    await this.recordRequestLog({
+      timestamp: new Date().toISOString(),
+      apiKeyFingerprint: fingerprintApiKey(apiKey),
+      apiKeyLabel: this.serverConfig.apiKeyLabels?.[apiKey],
+      path: routePath,
+      providerId,
+      model,
+      ok: false,
+      durationMs: Date.now() - startedAt,
+      errorCode: errorToCode(error),
+      errorMessage: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  private async recordRequestLog(entry: BrainRequestLogEntry): Promise<void> {
+    this.requestLogs.push(entry);
+    if (this.requestLogs.length > 300) {
+      this.requestLogs.splice(0, this.requestLogs.length - 300);
+    }
+    if (this.requestLogPath) {
+      await mkdir(path.dirname(this.requestLogPath), { recursive: true });
+      await appendFile(this.requestLogPath, `${JSON.stringify(entry)}\n`, 'utf8').catch(() => undefined);
+    }
+  }
+
+  private async loadPersistedMetrics(): Promise<void> {
+    this.healthMetrics.splice(0);
+    this.modelMetrics.splice(0);
+    this.requestLogs.splice(0);
+
+    if (this.metricsLogPath) {
+      const text = await readFile(this.metricsLogPath, 'utf8').catch(() => '');
+      for (const line of text.split('\n').filter(Boolean).slice(-1000)) {
+        const parsed = safeJsonParse<Record<string, unknown>>(line);
+        if (!parsed) continue;
+        if (parsed.type === 'model-speed') {
+          this.modelMetrics.push(parsed as unknown as BrainModelMetric);
+        } else if (typeof parsed.apiKeyFingerprint === 'string' && typeof parsed.ok === 'boolean') {
+          this.healthMetrics.push(parsed as unknown as BrainHealthMetric);
+        }
+      }
+      if (this.healthMetrics.length > 500) {
+        this.healthMetrics.splice(0, this.healthMetrics.length - 500);
+      }
+      if (this.modelMetrics.length > 500) {
+        this.modelMetrics.splice(0, this.modelMetrics.length - 500);
+      }
+    }
+
+    if (this.requestLogPath) {
+      const text = await readFile(this.requestLogPath, 'utf8').catch(() => '');
+      for (const line of text.split('\n').filter(Boolean).slice(-300)) {
+        const parsed = safeJsonParse<BrainRequestLogEntry>(line);
+        if (parsed) {
+          this.requestLogs.push(parsed);
+        }
+      }
+    }
+  }
+
+  private configureAutoHealthTimer(): void {
+    if (this.autoHealthTimer) {
+      clearInterval(this.autoHealthTimer);
+      this.autoHealthTimer = undefined;
+    }
+    if (this.serverConfig.autoHealthCheck?.enabled !== true) {
+      return;
+    }
+    const intervalMs = Math.max(60_000, this.serverConfig.autoHealthCheck.intervalMs ?? 5 * 60_000);
+    this.autoHealthTimer = setInterval(() => {
+      this.runHealthTest({ all: true }).catch(() => undefined);
+    }, intervalMs);
+    this.autoHealthTimer.unref?.();
+  }
+
   private async localState(): Promise<Record<string, unknown>> {
     const models = await this.availableModelDescriptors();
     const apiKeyRoutes = this.serverConfig.apiKeyRoutes ?? {};
     const modelProviderFilters = this.serverConfig.modelProviderFilters ?? {};
     const apiKeyDetails = this.serverConfig.apiKeys.map((key) => ({
       key,
+      label: this.serverConfig.apiKeyLabels?.[key],
       route: apiKeyRoutes[key],
     }));
     const upstreamProviders = Object.entries(this.options.config.providers)
@@ -434,17 +953,6 @@ export class BrainServer {
         hasStoredApiKey: Boolean(provider.apiKey),
         apiKeyEnv: provider.apiKeyEnv,
       }));
-    const deepSeekWebProvider = Object.entries(this.options.config.providers)
-      .filter(([_providerId, provider]) => provider.type === 'deepseek-web-local')
-      .map(([providerId, provider]) => ({
-        id: providerId,
-        type: provider.type,
-        displayName: provider.displayName ?? providerId,
-        baseUrl: provider.baseUrl ?? 'https://chat.deepseek.com',
-        disabled: provider.disabled === true,
-        hasStoredUserToken: typeof provider.options?.userToken === 'string' && provider.options.userToken.length > 0,
-        userTokenEnv: provider.options?.userTokenEnv,
-      }))[0];
     return {
       ok: true,
       service: 'LocalBrain',
@@ -458,11 +966,17 @@ export class BrainServer {
       providers: this.options.registry.list().map((provider) => provider.describe()),
       modelProviderFilters,
       upstreamProviders,
-      deepSeekWebProvider,
       requireAuth: this.serverConfig.requireAuth,
       apiKeys: this.serverConfig.apiKeys,
       apiKeyDetails,
       apiKeyRoutes,
+      apiKeyLabels: this.serverConfig.apiKeyLabels ?? {},
+      keyHealth: await this.keyHealthSnapshot(),
+      modelSpeed: this.modelSpeedSnapshot(),
+      requestLogs: this.requestLogs.slice(-100).reverse(),
+      autoHealthCheck: this.serverConfig.autoHealthCheck ?? { enabled: false, intervalMs: 5 * 60_000 },
+      metricsLogPath: this.metricsLogPath,
+      requestLogPath: this.requestLogPath,
       auditLogPath: this.serverConfig.auditLogPath,
     };
   }
@@ -475,13 +989,16 @@ export class BrainServer {
     const key = `brain-local-${randomBytes(24).toString('base64url')}`;
     const nextKeys = replace ? [key] : [...this.serverConfig.apiKeys, key];
     const nextApiKeyRoutes = replace ? {} : { ...this.serverConfig.apiKeyRoutes };
+    const nextApiKeyLabels = replace ? {} : { ...this.serverConfig.apiKeyLabels };
     const modelProviderFilters = { ...this.serverConfig.modelProviderFilters };
     this.serverConfig.apiKeys = nextKeys;
     this.serverConfig.apiKeyRoutes = nextApiKeyRoutes;
+    this.serverConfig.apiKeyLabels = nextApiKeyLabels;
     this.options.config.server = {
       ...this.serverConfig,
       apiKeys: nextKeys,
       apiKeyRoutes: nextApiKeyRoutes,
+      apiKeyLabels: nextApiKeyLabels,
       modelProviderFilters,
     };
 
@@ -506,12 +1023,42 @@ export class BrainServer {
 
     const nextRoutes = { ...(this.serverConfig.apiKeyRoutes ?? {}) };
     delete nextRoutes[apiKey];
+    const nextLabels = { ...(this.serverConfig.apiKeyLabels ?? {}) };
+    delete nextLabels[apiKey];
     this.serverConfig.apiKeys = nextKeys;
     this.serverConfig.apiKeyRoutes = nextRoutes;
+    this.serverConfig.apiKeyLabels = nextLabels;
     this.options.config.server = {
       ...this.serverConfig,
       apiKeys: nextKeys,
       apiKeyRoutes: nextRoutes,
+      apiKeyLabels: nextLabels,
+    };
+
+    await atomicWriteJson(this.options.configPath, this.options.config);
+  }
+
+  private async setLocalApiKeyLabel(body: LocalApiKeyLabelRequest): Promise<void> {
+    if (!this.options.configPath) {
+      throw new Error('cannot persist key label because server was started without configPath');
+    }
+
+    const apiKey = body.apiKey?.trim();
+    if (!apiKey || !this.serverConfig.apiKeys.includes(apiKey)) {
+      throw new Error('apiKey must be an existing local API key');
+    }
+
+    const label = body.label?.trim();
+    const nextLabels = { ...(this.serverConfig.apiKeyLabels ?? {}) };
+    if (label) {
+      nextLabels[apiKey] = label.slice(0, 80);
+    } else {
+      delete nextLabels[apiKey];
+    }
+    this.serverConfig.apiKeyLabels = nextLabels;
+    this.options.config.server = {
+      ...this.serverConfig,
+      apiKeyLabels: nextLabels,
     };
 
     await atomicWriteJson(this.options.configPath, this.options.config);
@@ -599,6 +1146,23 @@ export class BrainServer {
     await atomicWriteJson(this.options.configPath, this.options.config);
   }
 
+  private async setAutoHealth(body: AutoHealthRequest): Promise<void> {
+    if (!this.options.configPath) {
+      throw new Error('cannot persist auto health setting because server was started without configPath');
+    }
+    const intervalMs = Math.max(60_000, body.intervalMs ?? this.serverConfig.autoHealthCheck?.intervalMs ?? 5 * 60_000);
+    this.serverConfig.autoHealthCheck = {
+      enabled: body.enabled === true,
+      intervalMs,
+    };
+    this.options.config.server = {
+      ...this.serverConfig,
+      autoHealthCheck: this.serverConfig.autoHealthCheck,
+    };
+    await atomicWriteJson(this.options.configPath, this.options.config);
+    this.configureAutoHealthTimer();
+  }
+
   private async addUpstreamApiKeyProvider(body: UpstreamApiKeyRequest): Promise<Record<string, unknown>> {
     if (!this.options.configPath) {
       throw new Error('cannot persist upstream API key because server was started without configPath');
@@ -654,72 +1218,6 @@ export class BrainServer {
       selectedDefaultModel,
       warning,
     };
-  }
-
-  private async setDeepSeekWebProvider(body: DeepSeekWebProviderRequest): Promise<void> {
-    if (!this.options.configPath) {
-      throw new Error('cannot persist DeepSeek Web provider because server was started without configPath');
-    }
-
-    const providerId = 'deepseek-web-local';
-    const existing = this.options.config.providers[providerId];
-    const currentOptions = existing?.options ?? {};
-    const userToken = body.userToken?.trim();
-    const enabled = body.enabled === true;
-
-    const providerConfig: BrainProviderConfig = {
-      ...existing,
-      type: 'deepseek-web-local',
-      displayName: existing?.displayName ?? 'DeepSeek Web Experimental Provider',
-      baseUrl: existing?.baseUrl ?? 'https://chat.deepseek.com',
-      localOnly: true,
-      experimental: true,
-      disabled: !enabled,
-      options: {
-        ...currentOptions,
-        ...(userToken ? { userToken } : {}),
-        wasmPath: typeof currentOptions.wasmPath === 'string'
-          ? currentOptions.wasmPath
-          : 'src/modules/brain/providers/deepseek_sha3_wasm_bg.7b9ca65ddd.wasm',
-        modelCacheTtlMs: typeof currentOptions.modelCacheTtlMs === 'number'
-          ? currentOptions.modelCacheTtlMs
-          : 60_000,
-      },
-    };
-
-    if (enabled) {
-      const candidates = !userToken ? await discoverDeepSeekWebUserTokens() : [];
-      const discovered = uniqueTokenCandidates(candidates)[0]?.token;
-      if (discovered && typeof providerConfig.options?.userToken !== 'string') {
-        providerConfig.options = {
-          ...providerConfig.options,
-          userToken: discovered,
-        };
-      }
-    }
-
-    this.options.config.providers = {
-      ...this.options.config.providers,
-      [providerId]: providerConfig,
-    };
-
-    const currentFilters = { ...(this.serverConfig.modelProviderFilters ?? {}) };
-    currentFilters[providerId] = {
-      ...currentFilters[providerId],
-      enabled,
-      freeOnly: true,
-    };
-    this.serverConfig.modelProviderFilters = currentFilters;
-    this.options.config.server = {
-      ...this.serverConfig,
-      modelProviderFilters: currentFilters,
-    };
-
-    if (enabled) {
-      this.options.registry.registerOrReplace(deepSeekProviderFromConfig(providerId, providerConfig));
-    }
-
-    await atomicWriteJson(this.options.configPath, this.options.config);
   }
 
   private async setDefaultModel(model?: string): Promise<void> {
@@ -947,12 +1445,62 @@ function normalizeServerConfig(config?: BrainServerConfig): BrainServerConfig {
     host: config?.host ?? '127.0.0.1',
     port: config?.port ?? 8787,
     apiKeys,
+    apiKeyLabels: config?.apiKeyLabels ?? {},
     apiKeyRoutes: config?.apiKeyRoutes ?? {},
     modelProviderFilters: config?.modelProviderFilters ?? {},
     requireAuth: config?.requireAuth ?? true,
     publicBaseUrl: config?.publicBaseUrl,
     auditLogPath: config?.auditLogPath,
+    autoHealthCheck: config?.autoHealthCheck ?? { enabled: false, intervalMs: 5 * 60_000 },
   };
+}
+
+function resolveMetricsLogPath(configPath: string | undefined, auditLogPath: string | undefined): string | undefined {
+  if (configPath) {
+    return path.join(path.dirname(configPath), 'brain.metrics.jsonl');
+  }
+  if (auditLogPath) {
+    return path.join(path.dirname(auditLogPath), 'brain.metrics.jsonl');
+  }
+  return undefined;
+}
+
+function resolveRequestLogPath(configPath: string | undefined, auditLogPath: string | undefined): string | undefined {
+  if (configPath) {
+    return path.join(path.dirname(configPath), 'brain.requests.jsonl');
+  }
+  if (auditLogPath) {
+    return path.join(path.dirname(auditLogPath), 'brain.requests.jsonl');
+  }
+  return undefined;
+}
+
+function fingerprintApiKey(apiKey: string): string {
+  return createHash('sha256').update(apiKey).digest('hex').slice(0, 16);
+}
+
+function tokensPerSecond(tokens: number, durationMs: number): number {
+  if (tokens <= 0 || durationMs <= 0) {
+    return 0;
+  }
+  return Math.round((tokens / (durationMs / 1000)) * 10) / 10;
+}
+
+function errorToCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/unauthorized|invalid token|missing token|401/i.test(message)) {
+    return 'auth_error';
+  }
+  if (/429|rate limit|too many/i.test(message)) {
+    return 'rate_limited';
+  }
+  if (/timeout|aborted/i.test(message)) {
+    return 'timeout';
+  }
+  if (/unsupported model|model .* not found|does not support/i.test(message)) {
+    return 'model_error';
+  }
+  return 'error';
 }
 
 function corsHeaders(): Record<string, string> {
@@ -1012,18 +1560,12 @@ function addUnique(values: string[], value: string): string[] {
   return values.includes(value) ? values : [...values, value];
 }
 
-function deepSeekProviderFromConfig(providerId: string, providerConfig: BrainProviderConfig): DeepSeekWebLocalProvider {
-  return new DeepSeekWebLocalProvider({
-    id: providerId,
-    displayName: providerConfig.displayName,
-    baseUrl: providerConfig.baseUrl,
-    userToken: typeof providerConfig.options?.userToken === 'string' ? providerConfig.options.userToken : undefined,
-    userTokenEnv: typeof providerConfig.options?.userTokenEnv === 'string' ? providerConfig.options.userTokenEnv : undefined,
-    userTokenPath: typeof providerConfig.options?.userTokenPath === 'string' ? providerConfig.options.userTokenPath : undefined,
-    wasmPath: typeof providerConfig.options?.wasmPath === 'string' ? providerConfig.options.wasmPath : undefined,
-    modelCacheTtlMs: typeof providerConfig.options?.modelCacheTtlMs === 'number' ? providerConfig.options.modelCacheTtlMs : undefined,
-    experimental: providerConfig.experimental,
-  });
+function safeJsonParse<T>(value: string): T | undefined {
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return undefined;
+  }
 }
 
 async function fetchOpenAICompatibleModelIds(baseUrl: string | undefined, apiKey: string | undefined): Promise<string[]> {
@@ -1214,6 +1756,7 @@ function extractDeepSeekTokensFromText(text: string): string[] {
   };
 
   addMatches(/userToken[\s\S]{0,2048}?(eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})/g);
+  addMatches(/userToken[\s\S]{0,1024}?"value"\s*:\s*"([^"]{32,4096})"/g);
   addMatches(/"userToken"\s*:\s*"([^"]{32,4096})"/g);
   addMatches(/userToken[\s\S]{0,512}?["']([A-Za-z0-9._+/=-]{48,4096})["']/g);
   addMatches(/userToken[\s\S]{0,512}?([A-Za-z0-9._+/=-]{48,4096})/g);
@@ -1236,7 +1779,7 @@ function uniqueTokenCandidates(candidates: DeepSeekWebTokenCandidate[]): DeepSee
 }
 
 function sanitizeDiscoveredToken(value: string | undefined): string | undefined {
-  const cleaned = value
+  const cleaned = normalizeDeepSeekStorageToken(value)
     ?.replace(/\u0000/g, '')
     .trim()
     .replace(/^Bearer\s+/i, '');
@@ -1245,6 +1788,22 @@ function sanitizeDiscoveredToken(value: string | undefined): string | undefined 
   }
   if (!/^[A-Za-z0-9._+/=-]+$/.test(cleaned)) {
     return undefined;
+  }
+  return cleaned;
+}
+
+function normalizeDeepSeekStorageToken(value: string | undefined): string | undefined {
+  const cleaned = value?.replace(/\u0000/g, '').trim();
+  if (!cleaned) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(cleaned) as { value?: unknown };
+    if (typeof parsed.value === 'string' && parsed.value.trim()) {
+      return parsed.value.trim();
+    }
+  } catch {
+    // DeepSeek has used both raw localStorage tokens and JSON-wrapped values.
   }
   return cleaned;
 }
@@ -1275,6 +1834,7 @@ function renderConsoleHtml(): string {
       --accent: #176b55;
       --accent-2: #263f8f;
       --danger: #a33a2b;
+      --warning: #9a6a00;
       font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
     @media (prefers-color-scheme: dark) {
@@ -1287,48 +1847,84 @@ function renderConsoleHtml(): string {
         --accent: #46b28f;
         --accent-2: #8aa4ff;
         --danger: #ff8d7b;
+        --warning: #e8bd61;
       }
     }
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--bg); color: var(--text); }
-    main { max-width: 980px; margin: 0 auto; padding: 28px 20px 56px; }
-    header { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 24px; }
-    h1 { margin: 0; font-size: 28px; line-height: 1.1; letter-spacing: 0; }
-    h2 { margin: 0 0 12px; font-size: 17px; letter-spacing: 0; }
+    main { max-width: 1180px; margin: 0 auto; padding: 20px 16px 42px; }
+    header { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 16px; }
+    h1 { margin: 0; font-size: 24px; line-height: 1.1; letter-spacing: 0; }
+    h2 { margin: 0; font-size: 16px; letter-spacing: 0; }
     p { color: var(--muted); margin: 8px 0 0; line-height: 1.5; }
     .status { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 999px; padding: 8px 12px; color: var(--muted); background: var(--panel); white-space: nowrap; }
     .dot { width: 9px; height: 9px; border-radius: 999px; background: var(--accent); }
-    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
-    section { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 16px; min-width: 0; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    section { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 12px; min-width: 0; }
     .wide { grid-column: 1 / -1; }
+    .section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+    .toolbar { display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+    .channel-head { align-items: center; overflow-x: auto; padding-bottom: 2px; }
+    .channel-toolbar { flex-wrap: nowrap; justify-content: flex-end; min-width: max-content; }
+    .channel-toolbar select { width: auto; min-width: 92px; }
+    .connection-strip { display: grid; grid-template-columns: minmax(130px, 0.5fr) minmax(180px, 0.7fr) minmax(220px, 1fr) minmax(260px, 1.1fr) minmax(220px, 0.8fr); gap: 10px; }
+    .info-cell { min-width: 0; }
+    .info-cell label { display: block; margin-bottom: 4px; }
+    .copy-line { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
     .row { display: flex; gap: 10px; align-items: center; margin-top: 10px; min-width: 0; }
     code, input, select { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    input, select { width: 100%; min-width: 0; color: var(--text); background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 10px; }
-    button { border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; background: transparent; color: var(--text); cursor: pointer; white-space: nowrap; }
+    input, select { width: 100%; min-width: 0; color: var(--text); background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 7px 8px; }
+    button { border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px; background: transparent; color: var(--text); cursor: pointer; white-space: nowrap; }
     button.primary { background: var(--accent); border-color: var(--accent); color: white; }
     button.secondary { border-color: var(--accent-2); color: var(--accent-2); }
     button.danger { border-color: var(--danger); color: var(--danger); }
+    button:disabled { cursor: wait; opacity: 0.6; }
     ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
-    .key { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; }
-    .key-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px; display: grid; gap: 10px; }
-    .key-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto auto; gap: 10px; align-items: center; }
-    .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 1px solid var(--line); border-radius: 6px; padding: 10px; color: var(--muted); }
+    .channel-list { display: grid; gap: 8px; }
+    .channel-card { border: 1px solid var(--line); border-radius: 8px; overflow-x: auto; overflow-y: hidden; background: color-mix(in srgb, var(--panel) 92%, var(--bg)); }
+    .channel-card summary { list-style: none; cursor: pointer; }
+    .channel-card summary::-webkit-details-marker { display: none; }
+    .channel-summary { display: grid; grid-template-columns: 145px 92px 240px 82px 76px 82px 92px auto; gap: 8px; align-items: center; padding: 8px; min-height: 44px; min-width: 960px; }
+    .channel-name, .channel-model { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .channel-model-select { height: 34px; }
+    .channel-edit { border-top: 1px solid var(--line); padding: 10px; display: grid; grid-template-columns: minmax(160px, 1fr) minmax(160px, 1fr); gap: 10px; }
+    .channel-edit-wide { grid-column: 1 / -1; }
+    .channel-actions { display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+    .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 1px solid var(--line); border-radius: 6px; padding: 7px 8px; color: var(--muted); }
     .meta { display: grid; gap: 8px; color: var(--muted); font-size: 14px; }
     .notice { color: var(--muted); font-size: 13px; }
     .stack { display: grid; gap: 10px; }
     .split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-    .check { display: inline-flex; gap: 8px; align-items: center; color: var(--muted); font-size: 14px; }
+    .check { display: inline-flex; gap: 8px; align-items: center; color: var(--muted); font-size: 14px; white-space: nowrap; }
     .check input { width: auto; }
     .pill { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; font-size: 12px; color: var(--muted); }
+    .pill.ok { color: var(--accent); border-color: var(--accent); }
+    .pill.unstable { color: var(--warning); border-color: var(--warning); }
+    .pill.error { color: var(--danger); border-color: var(--danger); }
     .model-line { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; }
     .model-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .model-meta { margin-top: 3px; color: var(--muted); font-size: 12px; }
     .source-actions { display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+    details.advanced { grid-column: 1 / -1; border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 0; min-width: 0; }
+    details.advanced > summary { cursor: pointer; padding: 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; list-style: none; }
+    details.advanced > summary::-webkit-details-marker { display: none; }
+    .advanced-body { border-top: 1px solid var(--line); padding: 12px; display: grid; gap: 12px; }
+    .table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .table th, .table td { border-bottom: 1px solid var(--line); padding: 6px 8px; text-align: left; vertical-align: top; }
+    .table th { color: var(--muted); font-weight: 600; }
+    .chat-box { border: 1px solid var(--line); border-radius: 8px; min-height: 180px; max-height: 360px; overflow: auto; padding: 10px; display: grid; gap: 8px; align-content: start; }
+    .message { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; white-space: pre-wrap; line-height: 1.45; }
+    .message.user { border-color: var(--accent-2); }
+    .message.assistant { border-color: var(--accent); }
+    textarea { width: 100%; min-height: 60px; resize: vertical; color: var(--text); background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 9px; font: 14px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     @media (max-width: 760px) {
       header { display: block; }
       .status { margin-top: 16px; }
-      .grid, .split { grid-template-columns: 1fr; }
-      .row, .key, .key-actions { grid-template-columns: 1fr; flex-wrap: wrap; }
+      .grid, .split, .connection-strip, .channel-edit { grid-template-columns: 1fr; }
+      .row, .channel-actions, .toolbar { flex-wrap: wrap; }
+      .channel-toolbar { flex-wrap: nowrap; }
+    }
+    @media (max-width: 520px) {
       button { width: 100%; }
     }
   </style>
@@ -1343,40 +1939,109 @@ function renderConsoleHtml(): string {
       <div class="status"><span class="dot"></span><span id="status">Loading</span></div>
     </header>
     <div class="grid">
-      <section>
-        <h2 data-i18n="connection">Connection</h2>
-        <label class="notice">OPENAI_BASE_URL</label>
-        <div class="row">
-          <input id="baseUrl" readonly>
-          <button data-copy="baseUrl" data-i18n="copy">Copy</button>
+      <section class="wide">
+        <div class="section-head">
+          <h2 data-i18n="accessInfo">Access</h2>
+          <div class="toolbar">
+            <span class="pill"><span data-i18n="activeChannels">Active channels</span>: <span id="activeChannels">0</span></span>
+            <button id="toggleLanguage" data-i18n="toggleLanguage">中文</button>
+          </div>
         </div>
-        <label class="notice" data-i18n="defaultModel">Default model</label>
-        <div class="row">
-          <input id="model" readonly>
-          <button data-copy="model" data-i18n="copy">Copy</button>
-        </div>
-      </section>
-      <section>
-        <h2 data-i18n="service">Service</h2>
-        <div class="meta">
-          <div><span data-i18n="configFile">Config file</span>: <span id="configPath"></span></div>
-          <div><span data-i18n="auditLog">Audit log</span>: <span id="auditLogPath"></span></div>
-          <div><span data-i18n="provider">Provider</span>: <span id="providers"></span></div>
-          <div><span data-i18n="language">Language</span>: <button id="toggleLanguage" data-i18n="toggleLanguage">中文</button></div>
+        <div class="connection-strip">
+          <div class="info-cell">
+            <label class="notice" data-i18n="service">Service</label>
+            <div class="mono" id="serviceSummary"></div>
+          </div>
+          <div class="info-cell">
+            <label class="notice" data-i18n="channelStatus">Channel status</label>
+            <div class="mono" id="channelSummary"></div>
+          </div>
+          <div class="info-cell">
+            <label class="notice" data-i18n="recommendedChannel">Recommended channel</label>
+            <div class="mono" id="recommendedChannel"></div>
+          </div>
+          <div class="info-cell">
+            <label class="notice">OPENAI_BASE_URL</label>
+            <div class="copy-line">
+              <input id="baseUrl" readonly>
+              <button data-copy="baseUrl" data-i18n="copy">Copy</button>
+            </div>
+          </div>
+          <div class="info-cell">
+            <label class="notice" data-i18n="defaultRouteFallback">Default route fallback</label>
+            <div class="copy-line">
+              <input id="model" readonly>
+              <button data-copy="model" data-i18n="copy">Copy</button>
+            </div>
+          </div>
         </div>
       </section>
       <section class="wide">
-        <h2 data-i18n="localApiKeys">Local API Keys</h2>
-        <ul id="keys"></ul>
+        <div class="section-head channel-head">
+          <h2 data-i18n="channelManagement">Channel Management</h2>
+          <div class="toolbar channel-toolbar">
+            <button class="primary" id="testAllKeys" data-i18n="testAllKeys">Test All Channels (calls models)</button>
+            <button id="refreshHealth" data-i18n="refreshHealth">Refresh Health</button>
+            <select id="autoHealthInterval">
+              <option value="300000">5 min</option>
+              <option value="600000">10 min</option>
+              <option value="1800000">30 min</option>
+            </select>
+            <label class="check"><input id="autoHealthEnabled" type="checkbox"><span data-i18n="autoHealth">Auto health</span></label>
+          </div>
+        </div>
+        <ul id="channels" class="channel-list"></ul>
         <div class="row">
           <button class="primary" id="newKey" data-i18n="newKey">Generate New Key</button>
-          <button class="danger" id="replaceKey" data-i18n="replaceKey">Replace With New Key</button>
           <button class="secondary" id="toggleKeys" data-i18n="showHide">Show/Hide</button>
+          <button class="secondary" id="exportKeys" data-i18n="exportKeys">Export Keys</button>
         </div>
-        <p class="notice" data-i18n="localKeysNotice">These are local proxy keys, not Codex or OpenAI tokens. They are only used to access LocalBrain on 127.0.0.1.</p>
+        <p class="notice" data-i18n="channelsNotice">Each local key is a channel. Give it a name, assign a model, then use status, speed, and success rate to choose the right channel.</p>
       </section>
       <section class="wide">
-        <h2 data-i18n="upstreamApiKeys">Upstream API Keys</h2>
+        <div class="section-head">
+          <h2 data-i18n="chatAndSpeed">Chat & Speed</h2>
+        </div>
+        <div class="split">
+          <div class="stack">
+            <div class="split">
+              <select id="chatKey"></select>
+              <select id="chatModel"></select>
+            </div>
+            <div id="chatMessages" class="chat-box"></div>
+            <textarea id="chatInput" data-i18n-placeholder="chatPlaceholder" placeholder="Type a test message"></textarea>
+            <div class="row">
+              <button class="primary" id="sendChatTest" data-i18n="send">Send</button>
+              <button id="clearChatTest" data-i18n="clearChat">Clear</button>
+            </div>
+            <div id="chatMetrics" class="model-meta"></div>
+          </div>
+          <div class="stack">
+            <div class="row">
+              <select id="speedKey"></select>
+              <label class="check"><input id="speedFreeOnly" type="checkbox"><span data-i18n="onlyVisibleFree">Use current free filter</span></label>
+              <button class="primary" id="testVisibleModels" data-i18n="testVisibleModels">Test Visible Models</button>
+              <button id="exportModelSpeed" data-i18n="exportModelSpeed">Export Results</button>
+            </div>
+            <div style="overflow:auto;">
+              <table class="table">
+                <thead><tr><th data-i18n="modelColumn">Model</th><th data-i18n="statusColumn">Status</th><th data-i18n="latencyColumn">Latency</th><th data-i18n="speedColumn">Speed</th></tr></thead>
+                <tbody id="modelSpeedRows"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+      <details class="advanced">
+        <summary><h2 data-i18n="providerSources">Provider Sources</h2><span class="pill" data-i18n="advancedCollapsed">Advanced</span></summary>
+        <div class="advanced-body">
+          <ul id="modelSources"></ul>
+          <p class="notice" data-i18n="modelSourcesNotice">Disable a source to keep LocalBrain from listing or using its models. Free-only keeps only models marked as free for that source.</p>
+        </div>
+      </details>
+      <details class="advanced">
+        <summary><h2 data-i18n="upstreamApiKeys">Upstream API Keys</h2><span class="pill" data-i18n="advancedCollapsed">Advanced</span></summary>
+        <div class="advanced-body">
         <div class="stack">
           <div class="split">
             <input id="upstreamName" data-i18n-placeholder="providerName" placeholder="Provider name">
@@ -1394,29 +2059,27 @@ function renderConsoleHtml(): string {
           <ul id="upstreamProviders"></ul>
         </div>
         <p class="notice" data-i18n="upstreamNotice">Stored upstream keys stay in the local config file. Clients still use the LocalBrain base URL and local proxy key.</p>
-      </section>
-      <section class="wide">
-        <h2 data-i18n="deepSeekWeb">DeepSeek Web Experimental</h2>
-        <div class="stack">
-          <label class="check"><input id="deepSeekWebEnabled" type="checkbox"><span data-i18n="enableDeepSeekWeb">Enable DeepSeek Web provider</span></label>
-          <div class="split">
-            <input id="deepSeekWebToken" type="password" data-i18n-placeholder="deepSeekUserToken" placeholder="DeepSeek userToken">
-            <button class="primary" id="saveDeepSeekWeb" data-i18n="saveDeepSeekWeb">Save DeepSeek Web</button>
-          </div>
-          <div id="deepSeekWebStatus" class="model-meta"></div>
         </div>
-        <p class="notice" data-i18n="deepSeekWebNotice">This experimental provider is local-only and off by default. Leave userToken empty when enabling to auto-detect it from local browser DeepSeek login.</p>
-      </section>
-      <section class="wide">
-        <h2 data-i18n="modelSources">Model Sources</h2>
-        <ul id="modelSources"></ul>
-        <p class="notice" data-i18n="modelSourcesNotice">Disable a source to keep LocalBrain from listing or using its models. Free-only keeps only models marked as free for that source.</p>
-      </section>
-      <section class="wide">
-        <h2 data-i18n="models">Models</h2>
-        <label class="check"><input id="freeOnly" type="checkbox"><span data-i18n="onlyFreeModels">Only show free models</span></label>
-        <ul id="models"></ul>
-      </section>
+      </details>
+      <details class="advanced">
+        <summary><h2 data-i18n="advancedSettings">Advanced Settings</h2><span class="pill" data-i18n="advancedCollapsed">Advanced</span></summary>
+        <div class="advanced-body">
+          <div class="meta">
+            <div><span data-i18n="configFile">Config file</span>: <span id="configPath"></span></div>
+            <div><span data-i18n="auditLog">Audit log</span>: <span id="auditLogPath"></span></div>
+          </div>
+          <div>
+            <div class="section-head">
+              <h2 data-i18n="models">Models</h2>
+              <label class="check"><input id="freeOnly" type="checkbox"><span data-i18n="onlyFreeModels">Only show free models</span></label>
+            </div>
+            <ul id="models"></ul>
+          </div>
+          <div class="row">
+            <button class="danger" id="resetAllKeys" data-i18n="resetAllKeys">Reset All Channel Keys...</button>
+          </div>
+        </div>
+      </details>
     </div>
   </main>
   <script>
@@ -1424,31 +2087,46 @@ function renderConsoleHtml(): string {
     let state = null;
     let onlyFree = localStorage.getItem('localbrain.onlyFreeModels') === 'true';
     let language = localStorage.getItem('localbrain.consoleLanguage') || ((navigator.language || '').toLowerCase().startsWith('zh') ? 'zh' : 'en');
+    let chatMessages = [];
     const $ = (id) => document.getElementById(id);
     const copy = {
       en: {
         subtitle: 'Local OpenAI-compatible brain gateway',
         connection: 'Connection',
+        accessInfo: 'Access',
+        activeChannels: 'Active channels',
+        channelStatus: 'Channel status',
+        recommendedChannel: 'Recommended channel',
         copy: 'Copy',
         defaultModel: 'Default model',
+        defaultRouteFallback: 'Default fallback',
         service: 'Service',
         configFile: 'Config file',
         auditLog: 'Audit log',
-        provider: 'Provider',
+        provider: 'Source',
         language: 'Language',
         toggleLanguage: '中文',
         localApiKeys: 'Local API Keys',
+        channelManagement: 'Channel Management',
+        channelsNotice: 'Each local key is a channel. Name it, assign a model, then choose by status, speed, and success rate.',
         newKey: 'Generate New Key',
-        replaceKey: 'Replace With New Key',
+        resetAllKeys: 'Reset All Channel Keys...',
         showHide: 'Show/Hide',
+        exportKeys: 'Export Keys',
+        exportCopied: 'Key/model export copied to clipboard.',
+        keyName: 'Key name',
+        saveName: 'Save name',
         localKeysNotice: 'These are local proxy keys, not Codex or OpenAI tokens. They are only used to access LocalBrain on 127.0.0.1.',
-        upstreamApiKeys: 'Upstream API Keys',
-        providerName: 'Provider name',
+        upstreamApiKeys: 'Upstream Keys',
+        providerSources: 'Model Sources',
+        advancedSettings: 'Advanced Settings',
+        advancedCollapsed: 'Advanced',
+        providerName: 'Source name',
         apiKey: 'API key',
         fetchModels: 'Fetch Models',
         selectFetchedModel: 'Fetch models, then choose one (optional)',
         useAsDefault: 'Use as default when model is available',
-        addApiKeyProvider: 'Add API Key Provider',
+        addApiKeyProvider: 'Add Upstream Key',
         upstreamNotice: 'Stored upstream keys stay in the local config file. Clients still use the LocalBrain base URL and local proxy key.',
         modelSources: 'Model Sources',
         modelSourcesNotice: 'Disable a source to keep LocalBrain from listing or using its models. Free-only keeps only models marked as free for that source.',
@@ -1464,23 +2142,53 @@ function renderConsoleHtml(): string {
         clear: 'Clear',
         deleteKey: 'Delete Key',
         noUpstreamProviders: 'No upstream API key providers yet.',
-        deepSeekWeb: 'DeepSeek Web Experimental',
-        enableDeepSeekWeb: 'Enable DeepSeek Web provider',
-        deepSeekUserToken: 'DeepSeek userToken',
-        saveDeepSeekWeb: 'Save DeepSeek Web',
-        deepSeekWebNotice: 'This experimental provider is local-only and off by default. Leave userToken empty when enabling to auto-detect it from local browser DeepSeek login.',
-        deepSeekStored: 'DeepSeek Web token is stored locally.',
-        deepSeekMissing: 'DeepSeek Web token is not configured.',
-        updateDeepSeekFailed: 'Failed to update DeepSeek Web provider',
         storedKey: 'stored key',
         envKey: 'env key',
         noModels: 'No models match the current filter.',
         free: 'free',
         paidUnknown: 'paid/unknown',
         noSources: 'No model sources are registered.',
+        noChannels: 'No local channels yet.',
+        keyHealth: 'Key Status',
+        testAllKeys: 'Test All Channels (calls models)',
+        refreshHealth: 'Refresh Health',
+        keyColumn: 'Key',
+        modelColumn: 'Model',
+        statusColumn: 'Status',
+        latencyColumn: 'Latency',
+        speedColumn: 'Speed',
+        rateColumn: 'Rate',
+        actionsColumn: 'Actions',
+        keyHealthNotice: 'Health checks send a tiny prompt through the selected local key and record latency, speed, success rate, and common errors.',
+        testKey: 'Test',
+        modelSpeed: 'Model Speed',
+        testVisibleModels: 'Test Visible Models',
+        exportModelSpeed: 'Export Results',
+        modelSpeedCopied: 'Model speed results copied to clipboard.',
+        onlyVisibleFree: 'Use current free filter',
+        errorColumn: 'Error',
+        timeColumn: 'Time',
+        autoHealth: 'Auto health',
+        unknown: 'unknown',
+        ok: 'ok',
+        unstable: 'unstable',
+        error: 'error',
+        never: 'never',
+        chatTester: 'Chat Tester',
+        chatAndSpeed: 'Chat & Speed',
+        chatPlaceholder: 'Type a test message',
+        send: 'Send',
+        clearChat: 'Clear',
+        selectKey: 'Select key',
+        useAssignedModel: 'Use key assigned model',
+        chatTestFailed: 'Chat test failed',
         enabled: 'Enabled',
-        freeOnly: 'Free only',
-        useOnlyFree: 'Use only free',
+        freeOnly: 'Free models only',
+        useOnlyFree: 'Use only this free source',
+        testAllConfirm: 'This will call every configured channel once and may consume paid credits or membership quota. Continue?',
+        modelSpeedConfirm: 'This will call multiple visible models and may consume paid credits or membership quota. Continue?',
+        deleteKeyConfirm: 'Delete this local channel? Products using this key will stop working until they switch to another LocalBrain key.',
+        resetAllKeysConfirm: 'Reset all LocalBrain channel keys? Existing products using current keys will stop working until they are updated.',
         modelFetchFailed: 'Failed to fetch upstream models',
         updateKeyFailed: 'Failed to update key model',
         updateSourceFailed: 'Failed to update model source',
@@ -1490,29 +2198,43 @@ function renderConsoleHtml(): string {
       zh: {
         subtitle: '本地 OpenAI-compatible 大脑网关',
         connection: '连接',
+        accessInfo: '接入信息',
+        activeChannels: '最近活跃通道',
+        channelStatus: '通道状态',
+        recommendedChannel: '推荐通道',
         copy: '复制',
         defaultModel: '默认模型',
+        defaultRouteFallback: '默认备用路由',
         service: '服务',
         configFile: '配置文件',
         auditLog: '审计日志',
-        provider: 'Provider',
+        provider: '来源',
         language: '语言',
         toggleLanguage: 'English',
         localApiKeys: '本地 API Key',
+        channelManagement: '通道管理',
+        channelsNotice: '每个本地 Key 就是一条通道。命名、指定模型后，用状态、速度、成功率来决定使用哪条。',
         newKey: '生成新 Key',
-        replaceKey: '替换为新 Key',
+        resetAllKeys: '重置全部通道 Key...',
         showHide: '显示/隐藏',
+        exportKeys: '导出全部 Key',
+        exportCopied: 'Key 与模型对应关系已复制到剪贴板。',
+        keyName: 'Key 名称',
+        saveName: '保存名称',
         localKeysNotice: '这些是 LocalBrain 本地代理 Key，不是 Codex 或 OpenAI token，只用于访问 127.0.0.1 上的 LocalBrain。',
-        upstreamApiKeys: '上游 API Key',
-        providerName: 'Provider 名称',
+        upstreamApiKeys: '上游 Key',
+        providerSources: '模型来源',
+        advancedSettings: '高级设置',
+        advancedCollapsed: '高级',
+        providerName: '来源名称',
         apiKey: 'API Key',
         fetchModels: '拉取模型',
         selectFetchedModel: '先拉取模型，再选择一个（可选）',
         useAsDefault: '模型可用时设为默认',
-        addApiKeyProvider: '添加 API Key Provider',
+        addApiKeyProvider: '添加上游 Key',
         upstreamNotice: '上游 Key 会保存在本地配置文件中；产品端仍然使用 LocalBrain 的 Base URL 和本地代理 Key。',
         modelSources: '模型来源',
-        modelSourcesNotice: '关闭某个来源后，LocalBrain 不会列出或使用它的模型。Free only 只保留该来源中标记为免费的模型。',
+        modelSourcesNotice: '关闭某个来源后，LocalBrain 不会列出或使用它的模型。只用免费模型会只保留该来源中标记为免费的模型。',
         models: '模型',
         onlyFreeModels: '只显示免费模型',
         running: '运行中',
@@ -1524,24 +2246,54 @@ function renderConsoleHtml(): string {
         assign: '指定',
         clear: '清除',
         deleteKey: '删除 Key',
-        noUpstreamProviders: '还没有上游 API Key provider。',
-        deepSeekWeb: 'DeepSeek Web 实验 Provider',
-        enableDeepSeekWeb: '启用 DeepSeek Web Provider',
-        deepSeekUserToken: 'DeepSeek userToken',
-        saveDeepSeekWeb: '保存 DeepSeek Web',
-        deepSeekWebNotice: '这个实验 Provider 只用于本机，默认关闭。启用时 userToken 留空，会自动从本机浏览器的 DeepSeek 登录缓存里抓取。',
-        deepSeekStored: 'DeepSeek Web token 已保存在本地。',
-        deepSeekMissing: 'DeepSeek Web token 尚未配置。',
-        updateDeepSeekFailed: '更新 DeepSeek Web Provider 失败',
+        noUpstreamProviders: '还没有上游 Key。',
         storedKey: '已存储 Key',
         envKey: '环境变量 Key',
         noModels: '没有符合当前过滤条件的模型。',
         free: '免费',
         paidUnknown: '付费/未知',
         noSources: '没有注册模型来源。',
+        noChannels: '还没有本地通道。',
+        keyHealth: 'Key 状态',
+        testAllKeys: '测试全部通道（会调用模型）',
+        refreshHealth: '刷新状态',
+        keyColumn: 'Key',
+        modelColumn: '模型',
+        statusColumn: '状态',
+        latencyColumn: '耗时',
+        speedColumn: '速度',
+        rateColumn: '成功率/频率',
+        actionsColumn: '操作',
+        keyHealthNotice: '体检会通过选中的本地 Key 发送一个很小的提示词，并记录耗时、速度、成功率和常见错误。',
+        testKey: '测试',
+        modelSpeed: '模型测速',
+        testVisibleModels: '测试当前可见模型',
+        exportModelSpeed: '导出结果',
+        modelSpeedCopied: '模型测速结果已复制到剪贴板。',
+        onlyVisibleFree: '跟随免费筛选',
+        errorColumn: '错误',
+        timeColumn: '时间',
+        autoHealth: '自动体检',
+        unknown: '未知',
+        ok: '可用',
+        unstable: '不稳定',
+        error: '异常',
+        never: '从未',
+        chatTester: '试聊窗口',
+        chatAndSpeed: '试聊与测速',
+        chatPlaceholder: '输入一条测试消息',
+        send: '发送',
+        clearChat: '清空',
+        selectKey: '选择 Key',
+        useAssignedModel: '使用 Key 指定模型',
+        chatTestFailed: '试聊失败',
         enabled: '启用',
-        freeOnly: '只用免费',
-        useOnlyFree: '只用免费',
+        freeOnly: '只用免费模型',
+        useOnlyFree: '只用此来源免费模型',
+        testAllConfirm: '这会把每个已配置通道都调用一次，可能消耗付费额度或会员额度。继续吗？',
+        modelSpeedConfirm: '这会调用多个当前可见模型，可能消耗付费额度或会员额度。继续吗？',
+        deleteKeyConfirm: '删除这条本地通道？正在使用这个 Key 的产品需要切换到其他 LocalBrain Key，否则会停止工作。',
+        resetAllKeysConfirm: '重置全部 LocalBrain 通道 Key？所有正在使用当前 Key 的产品都会失效，需要更新到新 Key 后才能继续使用。',
         modelFetchFailed: '拉取上游模型失败',
         updateKeyFailed: '更新 Key 模型失败',
         updateSourceFailed: '更新模型来源失败',
@@ -1565,17 +2317,22 @@ function renderConsoleHtml(): string {
       const res = await fetch('/brain/local-state');
       state = await res.json();
       $('status').textContent = state.ok ? t('running') : t('unavailable');
+      $('serviceSummary').textContent = state.ok ? t('running') : t('unavailable');
+      $('channelSummary').textContent = channelSummaryText();
+      $('recommendedChannel').textContent = recommendedChannelText();
       $('baseUrl').value = state.openAIBaseUrl || '';
       $('model').value = state.defaultModel || '';
       $('configPath').textContent = state.configPath || t('notProvided');
       $('auditLogPath').textContent = state.auditLogPath || t('disabled');
-      $('providers').textContent = (state.providers || []).map((p) => p.id).join(', ');
+      $('activeChannels').textContent = activeChannelText();
       $('freeOnly').checked = onlyFree;
       applyLanguage();
-      renderKeys();
+      renderChannels();
       renderUpstreamProviders();
-      renderDeepSeekWeb();
       renderModelSources();
+      renderModelSpeed();
+      renderHealthControls();
+      renderChatTester();
       renderModels();
     }
     function escapeHtml(value) {
@@ -1585,39 +2342,235 @@ function renderConsoleHtml(): string {
       if (!key || key.length < 18) return '••••••';
       return key.slice(0, 14) + '••••••' + key.slice(-6);
     }
-    function renderKeys() {
+    function activeChannelText() {
+      const now = Date.now();
+      const labelsByFingerprint = new Map((state?.keyHealth || []).map((item) => [
+        item.apiKeyFingerprint,
+        state?.apiKeyLabels?.[item.apiKey] || mask(item.apiKey)
+      ]));
+      const active = [];
+      const seen = new Set();
+      for (const log of state?.requestLogs || []) {
+        const timestamp = Date.parse(log.timestamp || '');
+        if (!Number.isFinite(timestamp) || now - timestamp > 10 * 60 * 1000 || !log.apiKeyFingerprint || seen.has(log.apiKeyFingerprint)) {
+          continue;
+        }
+        seen.add(log.apiKeyFingerprint);
+        active.push(log.apiKeyLabel || labelsByFingerprint.get(log.apiKeyFingerprint) || log.apiKeyFingerprint);
+      }
+      return active.length > 0 ? active.slice(0, 4).join(', ') : '0';
+    }
+    function normalizedSuccessRate(value) {
+      if (typeof value !== 'number') return undefined;
+      return value > 1 ? value / 100 : value;
+    }
+    function channelHealthLevel(health = {}) {
+      if (health.status === 'error') return 'error';
+      if (health.status === 'ok') {
+        const rate = normalizedSuccessRate(health.successRate);
+        if (typeof rate === 'number' && rate < 0.8) return 'unstable';
+        if (typeof health.durationMs === 'number' && health.durationMs >= 15000) return 'unstable';
+        return 'ok';
+      }
+      return 'unknown';
+    }
+    function channelHealthRank(level) {
+      return { error: 0, unstable: 1, unknown: 2, ok: 3 }[level] ?? 2;
+    }
+    function providerShortName(providerId, modelId) {
+      if (providerId === 'codex-chatgpt-local') return 'Codex';
+      if (providerId === 'opencode-local') return 'OpenCode';
+      if (providerId === 'antigravity-local') return 'Antigravity';
+      if (providerId) return t('upstreamApiKeys');
+      if (String(modelId || '').startsWith('opencode/')) return 'OpenCode';
+      if (String(modelId || '').startsWith('antigravity/')) return 'Antigravity';
+      if (String(modelId || '').startsWith('gpt-')) return 'Codex';
+      return t('modelColumn');
+    }
+    function channelRows() {
       const keys = state?.apiKeys || [];
       const details = state?.apiKeyDetails || keys.map((key) => ({ key, route: null }));
-      const models = state?.availableModelDetails || [];
-      const options = (selected) => '<option value="">' + t('defaultRouting') + '</option>' + models.map((model) => {
-        const value = escapeHtml(model.id);
-        const label = escapeHtml((model.displayName || model.id) + (model.providerId ? ' · ' + model.providerId : '') + (model.free === true ? ' · ' + t('free') : ''));
-        return '<option value="' + value + '"' + (model.id === selected ? ' selected' : '') + '>' + label + '</option>';
-      }).join('');
-      $('keys').innerHTML = details.map((detail, index) => {
-        const key = detail.key;
+      const healthByKey = new Map((state?.keyHealth || []).map((item) => [item.apiKey, item]));
+      return details.map((detail) => {
         const route = detail.route || {};
-        const assigned = route.model ? escapeHtml(route.model + (route.providerId ? ' · ' + route.providerId : '')) : t('defaultRouting');
-        return '<li class="key-card"><div class="mono">' + (visible ? escapeHtml(key) : mask(key)) + '</div>' +
-          '<div class="model-meta">' + t('assignedModel') + ': ' + assigned + '</div>' +
-          '<div class="key-actions"><select data-key-model="' + index + '">' + options(route.model) + '</select>' +
-          '<button data-key-save="' + index + '">' + t('assign') + '</button><button data-key-clear="' + index + '">' + t('clear') + '</button><button data-key-delete="' + index + '">' + t('deleteKey') + '</button><button data-key="' + index + '">' + t('copy') + '</button></div></li>';
-      }).join('');
-      document.querySelectorAll('[data-key]').forEach((button) => {
-        button.addEventListener('click', () => navigator.clipboard.writeText(keys[Number(button.dataset.key)]));
+        const health = healthByKey.get(detail.key) || {};
+        const modelId = route.model || health.model || state?.defaultModel || '';
+        const providerId = route.providerId || health.providerId || modelById(modelId)?.providerId || '';
+        const level = channelHealthLevel(health);
+        return { detail, key: detail.key, route, health, modelId, providerId, level };
+      }).sort((left, right) => {
+        const rank = channelHealthRank(left.level) - channelHealthRank(right.level);
+        if (rank !== 0) return rank;
+        const duration = (right.health.durationMs ?? -1) - (left.health.durationMs ?? -1);
+        if (duration !== 0) return duration;
+        return String(left.detail.label || left.key).localeCompare(String(right.detail.label || right.key), language === 'zh' ? 'zh-CN' : 'en');
       });
-      document.querySelectorAll('[data-key-save]').forEach((button) => {
+    }
+    function channelSummaryText() {
+      const rows = channelRows();
+      const counts = rows.reduce((acc, row) => {
+        acc[row.level] = (acc[row.level] || 0) + 1;
+        return acc;
+      }, {});
+      return [
+        (counts.ok || 0) + ' ' + t('ok'),
+        (counts.unstable || 0) + ' ' + t('unstable'),
+        (counts.error || 0) + ' ' + t('error'),
+        (counts.unknown || 0) + ' ' + t('unknown')
+      ].join(' · ');
+    }
+    function recommendedChannelText() {
+      const rows = channelRows();
+      const preferred = rows.find((row) => row.level === 'ok') || rows.find((row) => row.level === 'unstable') || rows[0];
+      if (!preferred) return t('unknown');
+      const label = preferred.detail.label || mask(preferred.key);
+      return label + ' · ' + providerShortName(preferred.providerId, preferred.modelId) + ' · ' + formatMs(preferred.health.durationMs);
+    }
+    function modelById(modelId) {
+      return (state?.availableModelDetails || []).find((model) => model.id === modelId);
+    }
+    function modelLabel(modelId, providerId, includeProvider = false) {
+      if (!modelId) return t('defaultRouting');
+      const model = modelById(modelId);
+      const label = model?.displayName || shortModelName(modelId);
+      const provider = providerId || model?.providerId;
+      return includeProvider && provider ? label + ' · ' + provider : label;
+    }
+    function shortModelName(modelId) {
+      const names = {
+      };
+      const value = names[modelId] || modelId;
+      const raw = String(value || '');
+      if (raw.startsWith('opencode/')) return raw.slice('opencode/'.length);
+      if (raw.startsWith('antigravity/')) return raw.slice('antigravity/'.length);
+      return raw;
+    }
+    function modelOptions(selected) {
+      const models = state?.availableModelDetails || [];
+      const groups = new Map();
+      for (const model of models) {
+        const group = providerShortName(model.providerId, model.id);
+        if (!groups.has(group)) groups.set(group, []);
+        groups.get(group).push(model);
+      }
+      const defaultOption = '<option value="">' + t('defaultRouting') + '</option>';
+      const grouped = Array.from(groups.entries()).map(([group, items]) => {
+        const options = items.map((model) => {
+          const value = escapeHtml(model.id);
+          const label = escapeHtml((model.displayName || shortModelName(model.id)) + (model.free === true ? ' · ' + t('free') : ''));
+          return '<option value="' + value + '"' + (model.id === selected ? ' selected' : '') + '>' + label + '</option>';
+        }).join('');
+        return '<optgroup label="' + escapeHtml(group) + '">' + options + '</optgroup>';
+      }).join('');
+      return defaultOption + grouped;
+    }
+    function exportKeyModelText() {
+      const details = state?.apiKeyDetails || [];
+      const rows = details.map((detail) => {
+        const route = detail.route || {};
+        const modelId = route.model || state?.defaultModel || '';
+        const model = modelById(modelId);
+        return {
+          key: detail.key,
+          baseUrl: state?.openAIBaseUrl || '',
+          providerId: route.providerId || model?.providerId || '',
+          model: modelId,
+          modelName: model?.displayName || shortModelName(modelId),
+          free: model?.free === true,
+          status: (state?.keyHealth || []).find((item) => item.apiKey === detail.key)?.status || 'unknown'
+        };
+      });
+      const csv = ['key,base_url,provider_id,model,model_name,free,status']
+        .concat(rows.map((row) => [row.key, row.baseUrl, row.providerId, row.model, row.modelName, row.free, row.status]
+          .map((value) => '"' + String(value).replaceAll('"', '""') + '"').join(',')))
+        .join('\\n');
+      return JSON.stringify({ exportedAt: new Date().toISOString(), keys: rows }, null, 2) + '\\n\\nCSV\\n' + csv;
+    }
+    function exportModelSpeedText() {
+      const rows = state?.modelSpeed || [];
+      const csv = ['model,model_name,provider_id,ok,duration_ms,tokens_per_second,error']
+        .concat(rows.map((row) => [row.model, row.modelName || modelLabel(row.model, row.providerId), row.providerId || '', row.ok, row.durationMs ?? '', row.tokensPerSecond ?? '', row.errorMessage || '']
+          .map((value) => '"' + String(value).replaceAll('"', '""') + '"').join(',')))
+        .join('\\n');
+      return JSON.stringify({ exportedAt: new Date().toISOString(), models: rows }, null, 2) + '\\n\\nCSV\\n' + csv;
+    }
+    function renderChannels() {
+      const rows = channelRows();
+      $('channelSummary').textContent = channelSummaryText();
+      $('recommendedChannel').textContent = recommendedChannelText();
+      if (rows.length === 0) {
+        $('channels').innerHTML = '<li class="notice">' + t('noChannels') + '</li>';
+        return;
+      }
+      $('channels').innerHTML = rows.map((row, index) => {
+        const { detail, key, route, health, modelId, providerId, level } = row;
+        const label = detail.label || mask(key);
+        const assigned = route.model ? modelLabel(route.model, route.providerId, false) : t('defaultRouting');
+        const error = health.errorMessage ? '<div class="model-meta">' + escapeHtml(health.errorMessage) + '</div>' : '';
+        const rate = formatPercent(health.successRate) + '<div class="model-meta">' + escapeHtml(String(health.recentPerMinute || 0)) + '/min · ' + escapeHtml(String(health.recentCount || 0)) + '</div>';
+        return '<li><details class="channel-card"><summary><div class="channel-summary">' +
+          '<div class="channel-name"><strong>' + escapeHtml(label) + '</strong><div class="model-meta">' + (visible ? escapeHtml(key) : mask(key)) + '</div></div>' +
+          '<div><span class="pill">' + escapeHtml(providerShortName(providerId, modelId)) + '</span></div>' +
+          '<div class="channel-model"><select class="channel-model-select" data-channel-model="' + index + '">' + modelOptions(route.model) + '</select><div class="model-meta">' + escapeHtml(modelId || '') + '</div></div>' +
+          '<div><span class="pill ' + level + '">' + t(level) + '</span>' + error + '</div>' +
+          '<div>' + escapeHtml(formatMs(health.durationMs)) + '<div class="model-meta">TTFT≈' + escapeHtml(formatMs(health.firstTokenMs)) + '</div></div>' +
+          '<div>' + escapeHtml(formatTps(health.tokensPerSecond)) + '<div class="model-meta">' + escapeHtml(String(health.outputTokens ?? '-')) + ' tokens</div></div>' +
+          '<div>' + rate + '</div>' +
+          '<div class="channel-actions"><button data-channel-test="' + index + '">' + t('testKey') + '</button><button data-channel-copy="' + index + '">' + t('copy') + '</button></div>' +
+          '</div></summary><div class="channel-edit">' +
+          '<input data-key-label="' + index + '" placeholder="' + t('keyName') + '" value="' + escapeHtml(detail.label || '') + '">' +
+          '<div class="mono">' + (visible ? escapeHtml(key) : mask(key)) + '</div>' +
+          '<div class="channel-edit-wide model-meta">' + t('assignedModel') + ': ' + escapeHtml(assigned) + ' · ' + escapeHtml(modelId || '') + (providerId ? ' · ' + escapeHtml(providerId) : '') + ' · ' + t('timeColumn') + ': ' + escapeHtml(formatTime(health.lastTestAt)) + '</div>' +
+          '<div class="channel-actions channel-edit-wide">' +
+          '<button data-key-label-save="' + index + '">' + t('saveName') + '</button>' +
+          '<button data-key-clear="' + index + '">' + t('clear') + '</button>' +
+          '<button class="danger" data-key-delete="' + index + '">' + t('deleteKey') + '</button>' +
+          '</div></div></details></li>';
+      }).join('');
+      const renderedKeys = rows.map((row) => row.key);
+      document.querySelectorAll('[data-channel-model]').forEach((select) => {
+        select.addEventListener('click', (event) => {
+          event.stopPropagation();
+        });
+        select.addEventListener('change', (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const index = Number(select.dataset.channelModel);
+          setKeyModel(renderedKeys[index], select.value, select.value === '').catch((error) => alert(error.message));
+        });
+      });
+      document.querySelectorAll('[data-channel-copy]').forEach((button) => {
+        button.addEventListener('click', (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          navigator.clipboard.writeText(renderedKeys[Number(button.dataset.channelCopy)]);
+        });
+      });
+      document.querySelectorAll('[data-channel-test]').forEach((button) => {
+        button.addEventListener('click', (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const key = renderedKeys[Number(button.dataset.channelTest)];
+          if (!key) return;
+          button.disabled = true;
+          testKeyHealth(key).catch((error) => alert(error.message)).finally(() => { button.disabled = false; });
+        });
+      });
+      document.querySelectorAll('[data-key-label-save]').forEach((button) => {
         button.addEventListener('click', () => {
-          const index = Number(button.dataset.keySave);
-          const select = document.querySelector('[data-key-model="' + index + '"]');
-          setKeyModel(keys[index], select.value, false).catch((error) => alert(error.message));
+          const index = Number(button.dataset.keyLabelSave);
+          const input = document.querySelector('[data-key-label="' + index + '"]');
+          setKeyLabel(renderedKeys[index], input.value).catch((error) => alert(error.message));
         });
       });
       document.querySelectorAll('[data-key-clear]').forEach((button) => {
-        button.addEventListener('click', () => setKeyModel(keys[Number(button.dataset.keyClear)], '', true).catch((error) => alert(error.message)));
+        button.addEventListener('click', () => setKeyModel(renderedKeys[Number(button.dataset.keyClear)], '', true).catch((error) => alert(error.message)));
       });
       document.querySelectorAll('[data-key-delete]').forEach((button) => {
-        button.addEventListener('click', () => deleteLocalKey(keys[Number(button.dataset.keyDelete)]).catch((error) => alert(error.message)));
+        button.addEventListener('click', () => {
+          if (!confirm(t('deleteKeyConfirm'))) return;
+          deleteLocalKey(renderedKeys[Number(button.dataset.keyDelete)]).catch((error) => alert(error.message));
+        });
       });
     }
     function renderUpstreamProviders() {
@@ -1631,11 +2584,6 @@ function renderConsoleHtml(): string {
         '<div class="model-meta">' + escapeHtml(provider.id) + ' · ' + escapeHtml(provider.baseUrl) + '</div></div>' +
         '<span class="pill">' + (provider.hasStoredApiKey ? t('storedKey') : escapeHtml(provider.apiKeyEnv || t('envKey'))) + '</span></li>'
       )).join('');
-    }
-    function renderDeepSeekWeb() {
-      const provider = state?.deepSeekWebProvider || {};
-      $('deepSeekWebEnabled').checked = provider.disabled === false;
-      $('deepSeekWebStatus').textContent = provider.hasStoredUserToken ? t('deepSeekStored') : t('deepSeekMissing');
     }
     function renderModels() {
       const models = (state?.availableModelDetails || []).filter((model) => !onlyFree || model.free === true);
@@ -1660,7 +2608,7 @@ function renderConsoleHtml(): string {
         const filter = filters[provider.id] || {};
         const enabled = filter.enabled !== false;
         const freeOnly = filter.freeOnly === true;
-        return '<li class="model-line"><div><div class="model-title">' + escapeHtml(provider.displayName || provider.id) + '</div>' +
+        return '<li class="model-line"><div><div class="model-title">' + escapeHtml(providerShortName(provider.id, '')) + '</div>' +
           '<div class="model-meta">' + escapeHtml(provider.id) + ' · ' + escapeHtml(provider.kind) + '</div></div>' +
           '<div class="source-actions">' +
           '<label class="check"><input type="checkbox" data-source-enabled="' + index + '"' + (enabled ? ' checked' : '') + '>' + t('enabled') + '</label>' +
@@ -1689,6 +2637,62 @@ function renderConsoleHtml(): string {
         });
       });
     }
+    function renderModelSpeed() {
+      const rowsForKeys = channelRows();
+      const selectedKey = $('speedKey').value;
+      $('speedKey').innerHTML = rowsForKeys.map((row) => (
+        '<option value="' + escapeHtml(row.key) + '"' + (row.key === selectedKey ? ' selected' : '') + '>' + escapeHtml((row.detail.label || mask(row.key))) + '</option>'
+      )).join('');
+      $('speedFreeOnly').checked = onlyFree;
+      const rows = state?.modelSpeed || [];
+      if (rows.length === 0) {
+        $('modelSpeedRows').innerHTML = '<tr><td colspan="4" class="notice">' + t('unknown') + '</td></tr>';
+        return;
+      }
+      $('modelSpeedRows').innerHTML = rows.map((row) => {
+        const statusClass = row.ok ? 'ok' : 'error';
+        return '<tr><td>' + escapeHtml(row.modelName || modelLabel(row.model, row.providerId, false)) + '<div class="model-meta">' + escapeHtml(row.model || '') + '</div></td>' +
+          '<td><span class="pill ' + statusClass + '">' + (row.ok ? t('ok') : t('error')) + '</span><div class="model-meta">' + escapeHtml(row.providerId || '') + '</div></td>' +
+          '<td>' + escapeHtml(formatMs(row.durationMs)) + '</td>' +
+          '<td>' + escapeHtml(formatTps(row.tokensPerSecond)) + '<div class="model-meta">' + escapeHtml(row.errorMessage || String(row.outputTokens ?? 0) + ' tokens') + '</div></td></tr>';
+      }).join('');
+    }
+    function formatMs(value) {
+      if (typeof value !== 'number') return '-';
+      return value >= 1000 ? (value / 1000).toFixed(1) + 's' : value + 'ms';
+    }
+    function formatTps(value) {
+      return typeof value === 'number' ? value.toFixed(1) + ' t/s' : '-';
+    }
+    function formatPercent(value) {
+      const rate = normalizedSuccessRate(value);
+      return typeof rate === 'number' ? Math.round(rate * 100) + '%' : '-';
+    }
+    function formatTime(value) {
+      if (!value) return t('never');
+      try { return new Date(value).toLocaleTimeString(); } catch { return value; }
+    }
+    function renderHealthControls() {
+      const auto = state?.autoHealthCheck || {};
+      $('autoHealthEnabled').checked = auto.enabled === true;
+      $('autoHealthInterval').value = String(auto.intervalMs || 300000);
+    }
+    function renderChatTester() {
+      const rowsForKeys = channelRows();
+      const selectedKey = $('chatKey').value;
+      const selectedModel = $('chatModel').value;
+      $('chatKey').innerHTML = '<option value="">' + t('selectKey') + '</option>' + rowsForKeys.map((row) => (
+        '<option value="' + escapeHtml(row.key) + '"' + (row.key === selectedKey ? ' selected' : '') + '>' + escapeHtml(row.detail.label || mask(row.key)) + '</option>'
+      )).join('');
+      $('chatModel').innerHTML = '<option value="">' + t('useAssignedModel') + '</option>' + modelOptions(selectedModel).replace('<option value="">' + t('defaultRouting') + '</option>', '');
+      renderChatMessages();
+    }
+    function renderChatMessages() {
+      $('chatMessages').innerHTML = chatMessages.map((message) => (
+        '<div class="message ' + escapeHtml(message.role) + '"><strong>' + escapeHtml(message.role) + '</strong>\\n' + escapeHtml(message.content) + '</div>'
+      )).join('');
+      $('chatMessages').scrollTop = $('chatMessages').scrollHeight;
+    }
     async function createKey(replace) {
       const res = await fetch('/brain/admin/keys', {
         method: 'POST',
@@ -1696,9 +2700,12 @@ function renderConsoleHtml(): string {
         body: JSON.stringify({ replace })
       });
       const payload = await res.json();
+      if (!res.ok) throw new Error(payload?.error?.message || t('updateKeyFailed'));
       state = payload.state;
       visible = true;
-      renderKeys();
+      renderChannels();
+      renderChatTester();
+      renderModelSpeed();
     }
     async function addUpstreamKey() {
       const payload = {
@@ -1718,28 +2725,12 @@ function renderConsoleHtml(): string {
       state = body.state;
       $('upstreamKey').value = '';
       resetUpstreamModelSelect();
+      renderChannels();
       renderUpstreamProviders();
-      renderDeepSeekWeb();
       renderModelSources();
       renderModels();
-    }
-    async function saveDeepSeekWeb() {
-      const res = await fetch('/brain/admin/deepseek-web-provider', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          enabled: $('deepSeekWebEnabled').checked,
-          userToken: $('deepSeekWebToken').value
-        })
-      });
-      const body = await res.json();
-      if (!res.ok) throw new Error(body?.error?.message || t('updateDeepSeekFailed'));
-      state = body.state;
-      $('deepSeekWebToken').value = '';
-      renderDeepSeekWeb();
-      renderKeys();
-      renderModelSources();
-      renderModels();
+      renderChatTester();
+      renderModelSpeed();
     }
     async function fetchUpstreamModels() {
       const res = await fetch('/brain/admin/upstream-models', {
@@ -1765,10 +2756,11 @@ function renderConsoleHtml(): string {
       const body = await res.json();
       if (!res.ok) throw new Error(body?.error?.message || t('updateSourceFailed'));
       state = body.state;
-      renderKeys();
-      renderDeepSeekWeb();
+      renderChannels();
       renderModelSources();
       renderModels();
+      renderChatTester();
+      renderModelSpeed();
     }
     async function setKeyModel(apiKey, model, clear) {
       const res = await fetch('/brain/admin/key-model', {
@@ -1779,7 +2771,101 @@ function renderConsoleHtml(): string {
       const body = await res.json();
       if (!res.ok) throw new Error(body?.error?.message || t('updateKeyFailed'));
       state = body.state;
-      renderKeys();
+      renderChannels();
+      renderChatTester();
+      renderModelSpeed();
+    }
+    async function setKeyLabel(apiKey, label) {
+      const res = await fetch('/brain/admin/key-label', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ apiKey, label })
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body?.error?.message || t('updateKeyFailed'));
+      state = body.state;
+      renderChannels();
+      renderModelSpeed();
+      renderChatTester();
+    }
+    async function refreshHealth() {
+      const res = await fetch('/brain/admin/health');
+      const body = await res.json();
+      if (!res.ok) throw new Error(body?.error?.message || 'health failed');
+      state = { ...state, keyHealth: body.health };
+      renderChannels();
+      renderHealthControls();
+    }
+    async function testKeyHealth(apiKey, all = false, input, model) {
+      const res = await fetch('/brain/admin/health/test', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ apiKey, all, input, model })
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body?.error?.message || 'health test failed');
+      state = { ...state, keyHealth: body.health };
+      renderChannels();
+      renderHealthControls();
+      return body.results || [];
+    }
+    async function testVisibleModels() {
+      const res = await fetch('/brain/admin/model-speed-test', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          apiKey: $('speedKey').value || (state?.apiKeys || [])[0],
+          freeOnly: $('speedFreeOnly').checked,
+          input: '请只回复 OK'
+        })
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body?.error?.message || 'model speed test failed');
+      state = { ...state, modelSpeed: body.modelSpeed };
+      renderModelSpeed();
+      return body.results || [];
+    }
+    async function saveAutoHealth() {
+      const res = await fetch('/brain/admin/auto-health', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          enabled: $('autoHealthEnabled').checked,
+          intervalMs: Number($('autoHealthInterval').value)
+        })
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body?.error?.message || 'auto health failed');
+      state = body.state;
+      renderChannels();
+      renderHealthControls();
+    }
+    async function sendChatTest() {
+      const apiKey = $('chatKey').value || (state?.apiKeys || [])[0];
+      const input = $('chatInput').value.trim();
+      const model = $('chatModel').value;
+      if (!apiKey || !input) return;
+      chatMessages.push({ role: 'user', content: input });
+      $('chatInput').value = '';
+      $('chatMetrics').textContent = '';
+      renderChatMessages();
+      const results = await testKeyHealth(apiKey, false, input, model);
+      const result = results[0];
+      if (result?.ok) {
+        chatMessages.push({ role: 'assistant', content: result.reply || '' });
+        $('chatMetrics').textContent = [
+          modelLabel(result.model, result.providerId, false),
+          result.providerId,
+          formatMs(result.durationMs),
+          formatTps(result.tokensPerSecond),
+          String(result.outputTokens || 0) + ' tokens'
+        ].filter(Boolean).join(' · ');
+      } else {
+        const message = result?.errorMessage || t('chatTestFailed');
+        chatMessages.push({ role: 'assistant', content: message });
+        $('chatMetrics').textContent = result?.errorCode || 'error';
+      }
+      renderChatMessages();
     }
     async function deleteLocalKey(apiKey) {
       const res = await fetch('/brain/admin/delete-key', {
@@ -1790,32 +2876,66 @@ function renderConsoleHtml(): string {
       const body = await res.json();
       if (!res.ok) throw new Error(body?.error?.message || t('deleteKeyFailed'));
       state = body.state;
-      renderKeys();
+      renderChannels();
+      renderChatTester();
+      renderModelSpeed();
     }
     document.querySelectorAll('[data-copy]').forEach((button) => {
       button.addEventListener('click', () => navigator.clipboard.writeText($(button.dataset.copy).value));
     });
-    $('newKey').addEventListener('click', () => createKey(false));
-    $('replaceKey').addEventListener('click', () => createKey(true));
-    $('toggleKeys').addEventListener('click', () => { visible = !visible; renderKeys(); });
+    function runFromButton(button, task) {
+      button.disabled = true;
+      return Promise.resolve()
+        .then(task)
+        .catch((error) => alert(error.message))
+        .finally(() => { button.disabled = false; });
+    }
+    $('newKey').addEventListener('click', (event) => runFromButton(event.currentTarget, () => createKey(false)));
+    $('resetAllKeys').addEventListener('click', (event) => {
+      if (!confirm(t('resetAllKeysConfirm'))) return;
+      runFromButton(event.currentTarget, () => createKey(true));
+    });
+    $('toggleKeys').addEventListener('click', () => { visible = !visible; renderChannels(); });
+    $('exportKeys').addEventListener('click', () => navigator.clipboard.writeText(exportKeyModelText()).then(() => alert(t('exportCopied'))));
+    $('testVisibleModels').addEventListener('click', (event) => {
+      if (!confirm(t('modelSpeedConfirm'))) return;
+      runFromButton(event.currentTarget, () => testVisibleModels());
+    });
+    $('exportModelSpeed').addEventListener('click', () => navigator.clipboard.writeText(exportModelSpeedText()).then(() => alert(t('modelSpeedCopied'))));
     $('addUpstreamKey').addEventListener('click', () => addUpstreamKey().catch((error) => alert(error.message)));
     $('fetchUpstreamModels').addEventListener('click', () => fetchUpstreamModels().catch((error) => alert(error.message)));
-    $('saveDeepSeekWeb').addEventListener('click', () => saveDeepSeekWeb().catch((error) => alert(error.message)));
+    $('testAllKeys').addEventListener('click', (event) => {
+      if (!confirm(t('testAllConfirm'))) return;
+      runFromButton(event.currentTarget, () => testKeyHealth(undefined, true));
+    });
+    $('refreshHealth').addEventListener('click', (event) => runFromButton(event.currentTarget, () => refreshHealth()));
+    $('autoHealthEnabled').addEventListener('change', () => saveAutoHealth().catch((error) => alert(error.message)));
+    $('autoHealthInterval').addEventListener('change', () => saveAutoHealth().catch((error) => alert(error.message)));
+    $('sendChatTest').addEventListener('click', () => sendChatTest().catch((error) => alert(error.message)));
+    $('clearChatTest').addEventListener('click', () => { chatMessages = []; $('chatMetrics').textContent = ''; renderChatMessages(); });
+    $('chatInput').addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+        sendChatTest().catch((error) => alert(error.message));
+      }
+    });
     $('toggleLanguage').addEventListener('click', () => {
       language = language === 'zh' ? 'en' : 'zh';
       localStorage.setItem('localbrain.consoleLanguage', language);
       applyLanguage();
       if (state) {
-        renderKeys();
+        renderChannels();
         renderUpstreamProviders();
-        renderDeepSeekWeb();
         renderModelSources();
+        renderModelSpeed();
+        renderHealthControls();
+        renderChatTester();
         renderModels();
       }
     });
     $('freeOnly').addEventListener('change', () => {
       onlyFree = $('freeOnly').checked;
       localStorage.setItem('localbrain.onlyFreeModels', String(onlyFree));
+      renderModelSpeed();
       renderModels();
     });
     applyLanguage();

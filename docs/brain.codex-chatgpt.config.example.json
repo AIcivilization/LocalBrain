@@ -1,7 +1,7 @@
 {
   "defaultProvider": "codex-chatgpt-local",
-  "defaultModel": "gpt-5.5-mini",
-  "models": ["gpt-5.5-mini", "gpt-5.5"],
+  "defaultModel": "gpt-5.4-mini",
+  "models": ["gpt-5.4-mini", "gpt-5.5"],
   "providers": {
     "codex-chatgpt-local": {
       "type": "codex-chatgpt-local",
@@ -40,19 +40,6 @@
         "workspaceUri": "file:///Users/wf/LocalBrain",
         "modelCacheTtlMs": 60000
       }
-    },
-    "deepseek-web-local": {
-      "type": "deepseek-web-local",
-      "displayName": "DeepSeek Web Experimental Provider",
-      "baseUrl": "https://chat.deepseek.com",
-      "localOnly": true,
-      "experimental": true,
-      "disabled": true,
-      "options": {
-        "userTokenEnv": "DEEPSEEK_WEB_USER_TOKEN",
-        "wasmPath": "src/modules/brain/providers/deepseek_sha3_wasm_bg.7b9ca65ddd.wasm",
-        "modelCacheTtlMs": 60000
-      }
     }
   },
   "server": {
@@ -66,11 +53,11 @@
   "routing": {
     "chat": {
       "providerId": "codex-chatgpt-local",
-      "model": "gpt-5.5-mini"
+      "model": "gpt-5.4-mini"
     },
     "fast": {
       "providerId": "codex-chatgpt-local",
-      "model": "gpt-5.5-mini"
+      "model": "gpt-5.4-mini"
     },
     "code": {
       "providerId": "codex-chatgpt-local",

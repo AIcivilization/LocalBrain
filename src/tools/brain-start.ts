@@ -49,6 +49,7 @@ async function ensureLocalConfig(configPath: string, sourcePath: string): Promis
   try {
     await access(configPath);
     await mergeConfigDefaults(configPath, sourcePath);
+    await removeDeepSeekWebConfig(configPath);
     return;
   } catch {
     // Create the config below.
@@ -70,6 +71,7 @@ async function ensureLocalConfig(configPath: string, sourcePath: string): Promis
 
   await mkdir(path.dirname(configPath), { recursive: true });
   await writeFile(configPath, `${JSON.stringify(localConfig, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  await removeDeepSeekWebConfig(configPath);
 
   console.log('Created LocalBrain config');
   console.log(`Config:         ${configPath}`);
@@ -126,6 +128,53 @@ async function mergeConfigDefaults(configPath: string, sourcePath: string): Prom
     models: [...nextModels],
   };
   await writeFile(configPath, `${JSON.stringify(nextConfig, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+}
+
+async function removeDeepSeekWebConfig(configPath: string): Promise<void> {
+  const config = JSON.parse(await readFile(configPath, 'utf8')) as BrainConfig;
+  let changed = false;
+
+  for (const [providerId, providerConfig] of Object.entries(config.providers ?? {})) {
+    if (providerId === 'deepseek-web-local' || providerConfig.type === 'deepseek-web-local') {
+      delete config.providers[providerId];
+      changed = true;
+    }
+  }
+
+  const models = (config.models ?? []).filter((model) => !model.startsWith('deepseek-web/'));
+  if (models.length !== (config.models ?? []).length) {
+    config.models = models;
+    changed = true;
+  }
+
+  if (config.defaultModel?.startsWith('deepseek-web/')) {
+    config.defaultProvider = Object.keys(config.providers)[0] ?? 'mock-local';
+    config.defaultModel = config.models?.[0] ?? '';
+    changed = true;
+  }
+
+  for (const [taskKind, route] of Object.entries(config.routing ?? {})) {
+    if (route?.providerId === 'deepseek-web-local' || route?.model?.startsWith('deepseek-web/')) {
+      delete config.routing?.[taskKind as keyof typeof config.routing];
+      changed = true;
+    }
+  }
+
+  if (config.server?.modelProviderFilters?.['deepseek-web-local']) {
+    delete config.server.modelProviderFilters['deepseek-web-local'];
+    changed = true;
+  }
+
+  for (const [apiKey, route] of Object.entries(config.server?.apiKeyRoutes ?? {})) {
+    if (route?.providerId === 'deepseek-web-local' || route?.model?.startsWith('deepseek-web/')) {
+      delete config.server?.apiKeyRoutes?.[apiKey];
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  }
 }
 
 main().catch((error: unknown) => {

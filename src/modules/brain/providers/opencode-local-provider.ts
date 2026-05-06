@@ -1,4 +1,5 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import os from 'node:os';
 import { promisify } from 'node:util';
 
 import type {
@@ -102,7 +103,16 @@ export class OpenCodeLocalBrainProvider implements BrainProvider {
   }
 
   async generate(request: BrainProviderRequest): Promise<BrainProviderResponse> {
-    const response = await this.generateWithCli(request).catch(() => this.generateWithLocalServer(request));
+    let response: { content: string; raw: unknown };
+    try {
+      response = await this.generateWithCli(request);
+    } catch (cliError) {
+      try {
+        response = await this.generateWithLocalServer(request);
+      } catch (serverError) {
+        throw new Error(`OpenCode CLI failed: ${formatError(cliError)}; OpenCode local server failed: ${formatError(serverError)}`);
+      }
+    }
 
     return {
       providerId: this.id,
@@ -118,16 +128,17 @@ export class OpenCodeLocalBrainProvider implements BrainProvider {
   }
 
   private async generateWithCli(request: BrainProviderRequest): Promise<{ content: string; raw: unknown }> {
-    const { stdout } = await execFileAsync(this.cliPath, [
+    const timeout = requestTimeoutMs(request, 180_000);
+    const stdout = await spawnOpenCodeCli(this.cliPath, [
       'run',
       '--model',
       request.model,
       '--format',
       'json',
       buildPrompt(request.messages),
-    ], {
-      timeout: 180_000,
-      maxBuffer: 16 * 1024 * 1024,
+    ], timeout, {
+      cwd: opencodeWorkingDirectory(),
+      env: opencodeEnvironment(this.cliPath),
     });
 
     const content = extractCliContent(stdout);
@@ -169,16 +180,155 @@ export class OpenCodeLocalBrainProvider implements BrainProvider {
       headers.authorization = `Bearer ${password}`;
     }
 
-    const response = await fetch(`${this.baseUrl}${path}`, {
+    const response = await fetchWithTimeout(`${this.baseUrl}${path}`, {
       method,
       headers,
       body: JSON.stringify(body),
+      timeoutMs: 30_000,
     });
     if (!response.ok) {
       const text = await response.text();
       throw new Error(`OpenCode local provider failed: ${response.status} ${text}`);
     }
     return await response.json() as T;
+  }
+}
+
+interface SpawnOpenCodeOptions {
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+}
+
+function spawnOpenCodeCli(
+  cliPath: string,
+  args: string[],
+  timeoutMs: number,
+  options: SpawnOpenCodeOptions,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cliPath, args, {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let settled = false;
+    let timedOut = false;
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    const maxBuffer = 16 * 1024 * 1024;
+
+    const finish = (callback: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      callback();
+    };
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, timeoutMs);
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > maxBuffer) {
+        child.kill('SIGKILL');
+        finish(() => reject(new Error('OpenCode CLI stdout exceeded max buffer')));
+        return;
+      }
+      stdoutChunks.push(chunk);
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderrBytes += chunk.length;
+      if (stderrBytes > maxBuffer) {
+        child.kill('SIGKILL');
+        finish(() => reject(new Error('OpenCode CLI stderr exceeded max buffer')));
+        return;
+      }
+      stderrChunks.push(chunk);
+    });
+    child.on('error', (error) => {
+      finish(() => reject(error));
+    });
+    child.on('close', (code, signal) => {
+      finish(() => {
+        const stdout = Buffer.concat(stdoutChunks).toString('utf8');
+        const stderr = Buffer.concat(stderrChunks).toString('utf8').trim();
+        if (timedOut) {
+          reject(new Error(`OpenCode CLI timed out after ${timeoutMs}ms`));
+          return;
+        }
+        if (code !== 0) {
+          reject(new Error(`OpenCode CLI exited with code ${code ?? 'null'} signal ${signal ?? 'null'}${stderr ? `: ${stderr}` : ''}`));
+          return;
+        }
+        resolve(stdout);
+      });
+    });
+  });
+}
+
+function requestTimeoutMs(request: BrainProviderRequest, fallback: number): number {
+  const value = request.metadata?.localBrainTestTimeoutMs;
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(Math.max(Math.round(value), 5_000), fallback);
+}
+
+function opencodeWorkingDirectory(): string {
+  return process.env.HOME || os.homedir();
+}
+
+function opencodeEnvironment(cliPath: string): NodeJS.ProcessEnv {
+  const home = process.env.HOME || os.homedir();
+  const cliDir = cliPath.includes('/') ? cliPath.slice(0, cliPath.lastIndexOf('/')) : undefined;
+  const pathValue = [
+    cliDir,
+    process.env.PATH,
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    '/usr/bin',
+    '/bin',
+    '/usr/sbin',
+    '/sbin',
+  ].filter(Boolean).join(':');
+  return {
+    HOME: home,
+    USER: process.env.USER || os.userInfo().username,
+    LOGNAME: process.env.LOGNAME || process.env.USER || os.userInfo().username,
+    SHELL: process.env.SHELL || '/bin/zsh',
+    PATH: pathValue,
+    LANG: process.env.LANG || 'C.UTF-8',
+    TERM: process.env.TERM || 'dumb',
+    TMPDIR: process.env.TMPDIR || os.tmpdir(),
+    PWD: home,
+  };
+}
+
+function formatError(error: unknown): string {
+  if (error instanceof Error) {
+    const code = 'code' in error ? ` ${(error as { code?: unknown }).code}` : '';
+    const signal = 'signal' in error ? ` ${(error as { signal?: unknown }).signal}` : '';
+    return `${error.message}${code}${signal}`.trim();
+  }
+  return String(error);
+}
+
+async function fetchWithTimeout(url: string, options: RequestInit & { timeoutMs: number }): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
   }
 }
 

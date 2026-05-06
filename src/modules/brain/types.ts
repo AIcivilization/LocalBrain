@@ -208,6 +208,7 @@ export interface BrainServerConfig {
   host: string;
   port: number;
   apiKeys: string[];
+  apiKeyLabels?: Record<string, string>;
   apiKeyRoutes?: Record<string, {
     providerId?: string;
     model: string;
@@ -219,6 +220,10 @@ export interface BrainServerConfig {
   requireAuth: boolean;
   publicBaseUrl?: string;
   auditLogPath?: string;
+  autoHealthCheck?: {
+    enabled?: boolean;
+    intervalMs?: number;
+  };
 }
 
 export interface BrainRouteConfig {
