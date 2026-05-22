@@ -254,13 +254,13 @@ Security behavior:
 Prerequisite:
 
 ```bash
-～/.opencode/bin/opencode auth login
+~/.opencode/bin/opencode auth login
 ```
 
 List the currently available OpenCode models:
 
 ```bash
-/Users/wf/.opencode/bin/opencode models opencode
+opencode models opencode
 ```
 
 LocalBrain uses that command for dynamic model discovery. The model menu is not hardcoded; model IDs returned by OpenCode are exposed through:
@@ -275,7 +275,7 @@ When a local app selects a model whose ID starts with `opencode/`, LocalBrain ro
 For generation, LocalBrain first uses the OpenCode CLI directly:
 
 ```bash
-/Users/wf/.opencode/bin/opencode run --model opencode/gpt-5-nano --format json "..."
+opencode run --model opencode/gpt-5-nano --format json "..."
 ```
 
 That avoids depending on a long-running OpenCode server. The `baseUrl` setting remains available as a fallback for machines that already run `opencode serve`.
@@ -290,7 +290,6 @@ The default provider configuration is:
   "localOnly": true,
   "experimental": true,
   "options": {
-    "cliPath": "/Users/wf/.opencode/bin/opencode",
     "modelProvider": "opencode"
   }
 }

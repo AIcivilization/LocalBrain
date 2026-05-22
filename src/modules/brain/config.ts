@@ -3,6 +3,8 @@ import { readFile } from 'node:fs/promises';
 import { BrainRuntime } from './brain-runtime.ts';
 import { BrainProviderRegistry } from './provider-registry.ts';
 import { AntigravityLocalBrainProvider } from './providers/antigravity-local-provider.ts';
+import { AnthropicBrainProvider } from './providers/anthropic-provider.ts';
+import { ClaudeCodeLocalProvider } from './providers/claude-code-local-provider.ts';
 import { CodexChatGptLocalProvider } from './providers/codex-chatgpt-local-provider.ts';
 import { CustomHttpBrainProvider } from './providers/custom-http-provider.ts';
 import { ExperimentalSubscriptionBrainProvider } from './providers/experimental-subscription-provider.ts';
@@ -19,6 +21,8 @@ import type {
 const PROVIDER_KINDS: BrainProviderKind[] = [
   'mock',
   'openai-api-key',
+  'anthropic-api-key',
+  'claude-code-local',
   'vercel-ai-sdk',
   'custom-http',
   'opencode-local',
@@ -62,7 +66,7 @@ export function validateBrainConfig(config: BrainConfig): BrainConfigValidationR
       warnings.push(`provider ${providerId} reads local Codex auth but calls chatgpt.com; localOnly should usually be false`);
     }
 
-    if (providerConfig.type === 'openai-api-key' || providerConfig.type === 'vercel-ai-sdk') {
+    if (providerConfig.type === 'openai-api-key' || providerConfig.type === 'anthropic-api-key' || providerConfig.type === 'vercel-ai-sdk') {
       if (!providerConfig.apiKeyEnv && !providerConfig.apiKey) {
         errors.push(`provider ${providerId} requires apiKeyEnv or apiKey`);
       }
@@ -201,6 +205,20 @@ export function registerConfiguredProvider(
     return;
   }
 
+  if (providerConfig.type === 'claude-code-local') {
+    registry.register(new ClaudeCodeLocalProvider({
+      id: providerId,
+      displayName: providerConfig.displayName,
+      cliPath: typeof providerConfig.options?.cliPath === 'string' ? providerConfig.options.cliPath : undefined,
+      workDir: typeof providerConfig.options?.workDir === 'string' ? providerConfig.options.workDir : undefined,
+      timeoutMs: typeof providerConfig.options?.timeoutMs === 'number' ? providerConfig.options.timeoutMs : undefined,
+      modelCacheTtlMs: typeof providerConfig.options?.modelCacheTtlMs === 'number' ? providerConfig.options.modelCacheTtlMs : undefined,
+      settingSources: typeof providerConfig.options?.settingSources === 'string' ? providerConfig.options.settingSources : undefined,
+      experimental: providerConfig.experimental,
+    }));
+    return;
+  }
+
   if (providerConfig.type === 'opencode-local') {
     registry.register(new OpenCodeLocalBrainProvider({
       id: providerId,
@@ -234,8 +252,24 @@ export function registerConfiguredProvider(
     return;
   }
 
+  if (providerConfig.type === 'anthropic-api-key') {
+    registry.registerOrReplace(new AnthropicBrainProvider({
+      id: providerId,
+      baseUrl: providerConfig.baseUrl ?? 'https://api.anthropic.com/v1',
+      displayName: providerConfig.displayName,
+      apiKey: providerConfig.apiKey,
+      apiKeyEnv: providerConfig.apiKeyEnv ?? 'ANTHROPIC_API_KEY',
+      localOnly: providerConfig.localOnly,
+      experimental: providerConfig.experimental,
+      anthropicVersion: typeof providerConfig.options?.anthropicVersion === 'string'
+        ? providerConfig.options.anthropicVersion
+        : undefined,
+    }));
+    return;
+  }
+
   if (providerConfig.type === 'openai-api-key' || providerConfig.type === 'vercel-ai-sdk') {
-    registry.register(new OpenAICompatibleBrainProvider({
+    registry.registerOrReplace(new OpenAICompatibleBrainProvider({
       id: providerId,
       kind: providerConfig.type,
       baseUrl: providerConfig.baseUrl ?? 'https://api.openai.com/v1',

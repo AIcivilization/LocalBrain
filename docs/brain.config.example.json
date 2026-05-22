@@ -15,6 +15,26 @@
       "localOnly": false,
       "disabled": true
     },
+    "anthropic-api-key": {
+      "type": "anthropic-api-key",
+      "displayName": "Claude / Anthropic",
+      "baseUrl": "https://api.anthropic.com/v1",
+      "apiKeyEnv": "ANTHROPIC_API_KEY",
+      "localOnly": false,
+      "disabled": true
+    },
+    "claude-code-local": {
+      "type": "claude-code-local",
+      "displayName": "Claude Code Local Provider",
+      "localOnly": true,
+      "experimental": true,
+      "disabled": true,
+      "options": {
+        "timeoutMs": 900000,
+        "modelCacheTtlMs": 60000,
+        "settingSources": "project,local"
+      }
+    },
     "local-ai-gateway": {
       "type": "custom-http",
       "displayName": "Local AI Gateway",
@@ -36,10 +56,7 @@
       "experimental": true,
       "disabled": true,
       "options": {
-        "stateDbPath": "/Users/wf/Library/Application Support/Antigravity/User/globalStorage/state.vscdb",
         "sqlitePath": "sqlite3",
-        "imageOutputDir": "/Users/wf/LocalBrain/logs/antigravity-images",
-        "workspaceUri": "file:///Users/wf/LocalBrain",
         "modelCacheTtlMs": 60000
       }
     }

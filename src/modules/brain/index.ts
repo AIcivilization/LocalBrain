@@ -5,6 +5,8 @@ export { BrainModelRouter } from './model-router.ts';
 export { BrainProviderRegistry } from './provider-registry.ts';
 export { BrainServer } from './server.ts';
 export { BrainToolBridge } from './tool-bridge.ts';
+export { AnthropicBrainProvider } from './providers/anthropic-provider.ts';
+export { ClaudeCodeLocalProvider } from './providers/claude-code-local-provider.ts';
 export { CodexChatGptLocalProvider } from './providers/codex-chatgpt-local-provider.ts';
 export { CustomHttpBrainProvider } from './providers/custom-http-provider.ts';
 export { ExperimentalSubscriptionBrainProvider } from './providers/experimental-subscription-provider.ts';

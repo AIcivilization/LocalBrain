@@ -1,5 +1,8 @@
 import { execFile, spawn } from 'node:child_process';
+import { constants as fsConstants } from 'node:fs';
+import { access } from 'node:fs/promises';
 import os from 'node:os';
+import path from 'node:path';
 import { promisify } from 'node:util';
 
 import type {
@@ -41,7 +44,7 @@ export class OpenCodeLocalBrainProvider implements BrainProvider {
   readonly kind = 'opencode-local' as const;
   private readonly displayName: string;
   private readonly baseUrl: string;
-  private readonly cliPath: string;
+  private readonly configuredCliPath?: string;
   private readonly modelProvider: string;
   private readonly passwordEnv?: string;
   private readonly experimental: boolean;
@@ -54,7 +57,7 @@ export class OpenCodeLocalBrainProvider implements BrainProvider {
     this.id = options.id;
     this.displayName = options.displayName ?? 'OpenCode Local Provider';
     this.baseUrl = (options.baseUrl ?? 'http://127.0.0.1:4096').replace(/\/+$/, '');
-    this.cliPath = options.cliPath ?? '/Users/wf/.opencode/bin/opencode';
+    this.configuredCliPath = options.cliPath;
     this.modelProvider = options.modelProvider ?? 'opencode';
     this.passwordEnv = options.passwordEnv;
     this.experimental = options.experimental ?? true;
@@ -78,7 +81,8 @@ export class OpenCodeLocalBrainProvider implements BrainProvider {
       return this.modelCache.models;
     }
 
-    const { stdout } = await execFileAsync(this.cliPath, ['models', this.modelProvider], {
+    const cliPath = await resolveOpenCodeCliPath(this.configuredCliPath);
+    const { stdout } = await execFileAsync(cliPath, ['models', this.modelProvider], {
       timeout: 10_000,
       maxBuffer: 1024 * 1024,
     });
@@ -129,7 +133,8 @@ export class OpenCodeLocalBrainProvider implements BrainProvider {
 
   private async generateWithCli(request: BrainProviderRequest): Promise<{ content: string; raw: unknown }> {
     const timeout = requestTimeoutMs(request, 180_000);
-    const stdout = await spawnOpenCodeCli(this.cliPath, [
+    const cliPath = await resolveOpenCodeCliPath(this.configuredCliPath);
+    const stdout = await spawnOpenCodeCli(cliPath, [
       'run',
       '--model',
       request.model,
@@ -138,7 +143,7 @@ export class OpenCodeLocalBrainProvider implements BrainProvider {
       buildPrompt(request.messages),
     ], timeout, {
       cwd: opencodeWorkingDirectory(),
-      env: opencodeEnvironment(this.cliPath),
+      env: opencodeEnvironment(cliPath),
     });
 
     const content = extractCliContent(stdout);
@@ -191,6 +196,35 @@ export class OpenCodeLocalBrainProvider implements BrainProvider {
       throw new Error(`OpenCode local provider failed: ${response.status} ${text}`);
     }
     return await response.json() as T;
+  }
+}
+
+async function resolveOpenCodeCliPath(configuredCliPath?: string): Promise<string> {
+  if (configuredCliPath && await isExecutable(configuredCliPath)) {
+    return configuredCliPath;
+  }
+
+  for (const candidate of [
+    path.join(os.homedir(), '.opencode', 'bin', 'opencode'),
+    path.join(os.homedir(), '.local', 'bin', 'opencode'),
+    path.join(os.homedir(), '.npm-global', 'bin', 'opencode'),
+    '/opt/homebrew/bin/opencode',
+    '/usr/local/bin/opencode',
+    'opencode',
+  ]) {
+    if (candidate === 'opencode' || await isExecutable(candidate)) {
+      return candidate;
+    }
+  }
+  return 'opencode';
+}
+
+async function isExecutable(value: string): Promise<boolean> {
+  try {
+    await access(value, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
   }
 }
 

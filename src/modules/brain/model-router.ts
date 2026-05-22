@@ -28,6 +28,16 @@ export class BrainModelRouter {
         .find(([_providerId, provider]) => provider.type === 'opencode-local' && provider.disabled !== true)?.[0];
     }
 
+    if (model.startsWith('claude-code/')) {
+      return Object.entries(this.config.providers)
+        .find(([_providerId, provider]) => provider.type === 'claude-code-local' && provider.disabled !== true)?.[0];
+    }
+
+    if (model.startsWith('claude-')) {
+      return Object.entries(this.config.providers)
+        .find(([_providerId, provider]) => provider.type === 'anthropic-api-key' && provider.disabled !== true)?.[0];
+    }
+
     return undefined;
   }
 }

@@ -10,11 +10,12 @@ It runs on `127.0.0.1`, exposes OpenAI-style endpoints, and lets local apps use 
 - Local OpenAI-compatible HTTP gateway
 - `/v1/chat/completions`, `/v1/responses`, and `/v1/models`
 - Local API key generation and rotation
-- Upstream OpenAI-compatible API key registration through LocalBrain
+- Upstream OpenAI-compatible and Claude/Anthropic API key registration through LocalBrain
 - Per-key model routing, so one local key can be pinned to one provider model
 - Provider-level model source filters, including free-only mode
 - Default model selection from the menu bar
 - Codex ChatGPT local login provider for personal local testing
+- Claude Code local provider for personal subscription-backed local testing
 - OpenCode local provider with dynamically discovered free model options
 - Antigravity local provider, including image generation through `/v1/images/generations`
 - Configurable provider boundary for future product integration
@@ -60,6 +61,8 @@ gpt-5.4-mini
 gpt-5.5
 opencode/gpt-5-nano
 opencode/*-free
+claude-code/sonnet
+claude-code/opus
 ```
 
 ## HTTP API
@@ -110,6 +113,7 @@ Requirements:
 - macOS for the menu-bar app and DMG packaging
 - Node.js 22 or newer
 - Codex CLI or Codex App with local ChatGPT login when using the Codex provider
+- Claude Code CLI with local subscription login when using the Claude Code provider
 - OpenCode CLI when using the OpenCode local provider
 
 Run from source:
@@ -124,7 +128,7 @@ Open the local console:
 http://127.0.0.1:8787/
 ```
 
-Use the bilingual console or the menu-bar `Model Sources > Upstream Key` item to add or change an upstream API key. Local apps still use LocalBrain's own `OPENAI_BASE_URL` and local proxy key; LocalBrain stores the upstream key in the local config file and uses it when routing to that provider. Upstream model choices are fetched from the upstream `/models` endpoint instead of being hardcoded.
+Use the bilingual console or the menu-bar `Model Sources > Upstream Key` item to add or change an upstream API key. Local apps still use LocalBrain's own `OPENAI_BASE_URL` and local proxy key; LocalBrain stores the upstream key in the local config file and uses it when routing to that provider. Upstream model choices are fetched from the upstream model-list endpoint instead of being hardcoded. For Claude, name the source `Claude`, use `https://api.anthropic.com/v1` as the Base URL, paste your Anthropic API key, fetch models, then assign a `claude-*` model to the local channel you want to use.
 
 Each local proxy key can also be assigned to a model from the console. When a key is assigned, LocalBrain forces requests made with that key to use the assigned model, even if the client sends a different `model` value. Calling `/v1/models` with that key returns only the assigned model, which makes the key suitable for giving one product one stable model route.
 
@@ -151,7 +155,9 @@ List discovered OpenCode models:
 .opencode/bin/opencode models opencode
 ```
 
-OpenAI-compatible providers discover models from their upstream `/models` endpoint when their API key environment variable is available.
+OpenAI-compatible providers discover models from their upstream `/models` endpoint when their API key environment variable is available. Claude/Anthropic providers use Anthropic's `/v1/models` and `/v1/messages` APIs with `x-api-key` authentication.
+
+Claude Code local models use the installed `claude` CLI in non-interactive print mode. LocalBrain exposes them as `claude-code/sonnet` and `claude-code/opus`, disables Claude Code tools for these proxy calls, and does not require an Anthropic API key.
 
 Build the macOS app:
 
@@ -179,10 +185,11 @@ LocalBrain is intended for local personal testing and development.
 - It stores generated local API keys in local config files under `logs/`.
 - It does not commit local runtime keys, audit logs, built app bundles, or DMG files.
 - It reads local Codex auth state only when the Codex provider is used.
-- It asks OpenAI-compatible upstreams for their current `/models` list when an API key is configured.
+- It calls the local Claude Code CLI only when the Claude Code provider is used.
+- It asks OpenAI-compatible upstreams and Claude/Anthropic upstreams for their current model list when an API key is configured.
 - It asks the OpenCode CLI for available free models when the OpenCode provider is configured.
 - It uses the OpenCode CLI directly for OpenCode requests, with local server mode kept as a fallback.
-- Codex/ChatGPT subscription-backed behavior is for local testing, not for production redistribution.
+- Codex/ChatGPT and Claude Code subscription-backed behavior is for local testing, not for production redistribution.
 
 Production apps should depend on the LocalBrain protocol boundary or an approved provider, not on personal subscription login behavior.
 

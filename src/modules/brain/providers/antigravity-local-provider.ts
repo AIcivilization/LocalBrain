@@ -4,6 +4,7 @@ import { mkdir, readFile } from 'node:fs/promises';
 import http2 from 'node:http2';
 import os from 'node:os';
 import path from 'node:path';
+import tls from 'node:tls';
 import { promisify } from 'node:util';
 
 import type {
@@ -31,9 +32,19 @@ const DEFAULT_STATE_DB_PATH = path.join(
 
 const KNOWN_ANTIGRAVITY_MODELS: Array<{ displayName: string; id: string; enumNumber: number; free?: boolean }> = [
   {
+    displayName: 'Gemini 3.5 Flash (High)',
+    id: 'antigravity/gemini-3.5-flash-high',
+    enumNumber: 1132,
+  },
+  {
+    displayName: 'Gemini 3.5 Flash (Medium)',
+    id: 'antigravity/gemini-3.5-flash-medium',
+    enumNumber: 1020,
+  },
+  {
     displayName: 'Gemini 3.1 Pro (High)',
     id: 'antigravity/gemini-3.1-pro-high',
-    enumNumber: 1037,
+    enumNumber: 1016,
   },
   {
     displayName: 'Gemini 3.1 Pro (Low)',
@@ -154,8 +165,8 @@ export class AntigravityLocalBrainProvider implements BrainProvider {
       return this.modelCache.models;
     }
 
-    const userStatus = await this.readUserStatusProto();
-    const discovered = discoverAntigravityModels(userStatus);
+    const modelCatalog = await this.readModelCatalogProto();
+    const discovered = discoverAntigravityModels(modelCatalog);
     const models = discovered.map((model) => ({
       id: model.id,
       providerId: this.id,
@@ -196,12 +207,33 @@ export class AntigravityLocalBrainProvider implements BrainProvider {
   }
 
   private async resolveModel(modelId: string): Promise<{ displayName: string; enumNumber: number }> {
-    const userStatus = await this.readUserStatusProto();
-    const model = discoverAntigravityModels(userStatus).find((candidate) => candidate.id === modelId);
+    const modelCatalog = await this.readModelCatalogProto();
+    const model = discoverAntigravityModels(modelCatalog).find((candidate) => candidate.id === modelId);
     if (!model) {
       throw new Error(`unsupported Antigravity model: ${modelId}`);
     }
     return model;
+  }
+
+  private async readModelCatalogProto(): Promise<Buffer> {
+    const liveCatalog = await this.readLiveModelCatalogProto();
+    return liveCatalog ?? await this.readUserStatusProto();
+  }
+
+  private async readLiveModelCatalogProto(): Promise<Buffer | undefined> {
+    try {
+      const endpoint = await this.resolveGrpcEndpoint();
+      const messages = await requestAntigravityUnary({
+        endpoint,
+        path: '/exa.language_server_pb.LanguageServerService/GetCascadeModelConfigData',
+        message: Buffer.alloc(0),
+        timeoutMs: 10_000,
+      });
+      const payload = Buffer.concat(messages);
+      return payload.length > 0 ? payload : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private async readUserStatusProto(): Promise<Buffer> {
@@ -228,11 +260,12 @@ export class AntigravityLocalBrainProvider implements BrainProvider {
     return JSON.parse(text) as T;
   }
 
-  private async resolveGrpcEndpoint(): Promise<{ port: number; csrfToken: string }> {
+  private async resolveGrpcEndpoint(): Promise<AntigravityGrpcEndpoint> {
     if (this.httpsServerPort && this.csrfToken) {
       return {
         port: this.httpsServerPort,
         csrfToken: this.csrfToken,
+        secure: true,
       };
     }
 
@@ -240,16 +273,23 @@ export class AntigravityLocalBrainProvider implements BrainProvider {
       timeout: 10_000,
       maxBuffer: 1024 * 1024,
     });
-    for (const line of stdout.split(/\r?\n/)) {
-      if (!line.includes('language_server_macos_arm') || !line.includes('--https_server_port')) {
-        continue;
-      }
-      const port = Number(matchProcessArg(line, '--https_server_port'));
+    const processLines = stdout
+      .split(/\r?\n/)
+      .filter((line) => line.includes('language_server_macos_arm'))
+      .sort((left, right) => Number(right.includes('--enable_lsp')) - Number(left.includes('--enable_lsp')));
+    for (const line of processLines) {
+      const httpsServerPort = matchProcessArg(line, '--https_server_port');
+      const extensionServerPort = matchProcessArg(line, '--extension_server_port');
       const csrfToken = matchProcessArg(line, '--csrf_token');
+      const port = Number(
+        httpsServerPort
+        ?? (await resolveLanguageServerHttpsPort(matchProcessPid(line), extensionServerPort)),
+      );
       if (Number.isInteger(port) && port > 0 && csrfToken) {
         return {
           port,
           csrfToken,
+          secure: true,
         };
       }
     }
@@ -261,6 +301,7 @@ export class AntigravityLocalBrainProvider implements BrainProvider {
 interface AntigravityGrpcEndpoint {
   port: number;
   csrfToken: string;
+  secure: boolean;
 }
 
 async function requestAntigravityModelResponse(options: {
@@ -367,15 +408,26 @@ async function requestAntigravityUnary(options: {
   timeoutMs: number;
 }): Promise<Buffer[]> {
   const body = encodeGrpcFrame(options.message);
-  const client = http2.connect(`https://127.0.0.1:${options.endpoint.port}`, {
-    rejectUnauthorized: false,
-  });
+  const protocol = options.endpoint.secure ? 'https' : 'http';
+  const client = http2.connect(`${protocol}://127.0.0.1:${options.endpoint.port}`, options.endpoint.secure
+    ? { rejectUnauthorized: false }
+    : undefined);
 
   try {
     return await new Promise<Buffer[]>((resolve, reject) => {
       const chunks: Buffer[] = [];
       let grpcStatus = 'unknown';
       let grpcMessage = '';
+      let finished = false;
+      let timeout: NodeJS.Timeout;
+      const finish = (callback: () => void): void => {
+        if (finished) {
+          return;
+        }
+        finished = true;
+        clearTimeout(timeout);
+        callback();
+      };
       const request = client.request({
         ':method': 'POST',
         ':path': options.path,
@@ -384,11 +436,14 @@ async function requestAntigravityUnary(options: {
         'x-codeium-csrf-token': options.endpoint.csrfToken,
       });
 
-      const timeout = setTimeout(() => {
+      timeout = setTimeout(() => {
         request.close(http2.constants.NGHTTP2_CANCEL);
-        reject(new Error('Antigravity local gRPC request timed out'));
+        finish(() => reject(new Error('Antigravity local gRPC request timed out')));
       }, options.timeoutMs);
 
+      client.on('error', (error) => {
+        finish(() => reject(error));
+      });
       request.on('data', (chunk) => {
         chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
       });
@@ -401,16 +456,14 @@ async function requestAntigravityUnary(options: {
         }
       });
       request.on('error', (error) => {
-        clearTimeout(timeout);
-        reject(error);
+        finish(() => reject(error));
       });
       request.on('end', () => {
-        clearTimeout(timeout);
         if (grpcStatus !== '0' && grpcStatus !== 'unknown') {
-          reject(new Error(`Antigravity local gRPC failed: ${grpcStatus} ${grpcMessage}`.trim()));
+          finish(() => reject(new Error(`Antigravity local gRPC failed: ${grpcStatus} ${grpcMessage}`.trim())));
           return;
         }
-        resolve(decodeGrpcFrames(Buffer.concat(chunks)));
+        finish(() => resolve(decodeGrpcFrames(Buffer.concat(chunks))));
       });
 
       request.end(body);
@@ -630,6 +683,65 @@ function decodeStringField(buffer: Buffer, field: number): string | undefined {
 function matchProcessArg(line: string, name: string): string | undefined {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return line.match(new RegExp(`${escaped}\\s+([^\\s]+)`))?.[1];
+}
+
+function matchProcessPid(line: string): number | undefined {
+  const pid = Number(line.trim().split(/\s+/)[1]);
+  return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+}
+
+async function resolveLanguageServerHttpsPort(pid: number | undefined, extensionServerPort?: string): Promise<number | undefined> {
+  if (!pid) {
+    return undefined;
+  }
+
+  try {
+    const { stdout } = await execFileAsync('lsof', ['-nP', '-a', '-p', String(pid), '-iTCP', '-sTCP:LISTEN'], {
+      timeout: 5_000,
+      maxBuffer: 1024 * 1024,
+    });
+    const ignoredPort = Number(extensionServerPort);
+    const ports = [...stdout.matchAll(/TCP\s+127\.0\.0\.1:(\d+)\s+\(LISTEN\)/g)]
+      .map((match) => Number(match[1]))
+      .filter((port) => Number.isInteger(port) && port > 0 && port !== ignoredPort)
+      .sort((left, right) => left - right);
+
+    for (const port of [...new Set(ports)]) {
+      if (await isTlsHttp2Port(port)) {
+        return port;
+      }
+    }
+  } catch {
+    return undefined;
+  }
+
+  return undefined;
+}
+
+async function isTlsHttp2Port(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = tls.connect({
+      host: '127.0.0.1',
+      port,
+      rejectUnauthorized: false,
+      ALPNProtocols: ['h2'],
+    });
+    const timeout = setTimeout(() => {
+      socket.destroy();
+      resolve(false);
+    }, 1_000);
+
+    socket.once('secureConnect', () => {
+      clearTimeout(timeout);
+      const isHttp2 = socket.alpnProtocol === 'h2';
+      socket.destroy();
+      resolve(isHttp2);
+    });
+    socket.once('error', () => {
+      clearTimeout(timeout);
+      resolve(false);
+    });
+  });
 }
 
 function extractImagePaths(buffer: Buffer, outputDir: string): string[] {

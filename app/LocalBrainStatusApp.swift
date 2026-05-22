@@ -28,6 +28,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         let recentCount: Int
         let lastTestAt: String?
         let errorMessage: String?
+        let limitInfo: [String: Any]?
     }
 
     private struct ModelInfo {
@@ -126,6 +127,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
     private func refreshState() {
         var state = fetchJSON(url: "http://127.0.0.1:8787/brain/local-state") ?? [:]
         state["codex"] = codexStatus()
+        state["claudeCode"] = claudeCodeStatus()
         state["opencode"] = opencodeStatus(state: state)
         state["antigravity"] = antigravityStatus(state: state)
         lastState = state
@@ -169,6 +171,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         let hasUnstableChannels = channels.contains { channelHealthLevel($0) == .unstable }
         menu.addItem(coloredItem(title: compactTopStatusTitle(), ok: serviceOK && !hasChannelErrors && !hasUnstableChannels, warning: serviceOK && !hasChannelErrors && hasUnstableChannels))
         menu.addItem(disabledItem(recommendedChannelTitle()))
+        menu.addItem(disabledItem(todayUsageTitle()))
         menu.addItem(actionItem(text("Open Console", "\u{6253}\u{5F00}\u{63A7}\u{5236}\u{53F0}"), #selector(openConsole)))
         menu.addItem(actionItem(text("Refresh Status", "\u{5237}\u{65B0}\u{72B6}\u{6001}"), #selector(refreshStatusAction)))
         menu.addItem(NSMenuItem.separator())
@@ -228,6 +231,18 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         return text(
             "Recommended: \(recommended.label) · \(providerShortName(for: recommended)) · \(speed)",
             "\u{63A8}\u{8350}\u{FF1A}\(recommended.label) · \(providerShortName(for: recommended)) · \(speed)"
+        )
+    }
+
+    private func todayUsageTitle() -> String {
+        let usage = lastState["usage"] as? [String: Any] ?? [:]
+        let today = usage["today"] as? [String: Any] ?? [:]
+        let active = intValue(today["activeRequests"]) ?? ((usage["active"] as? [[String: Any]])?.count ?? 0)
+        let requests = intValue(today["requestCount"]) ?? 0
+        let tokens = intValue(today["totalTokens"]) ?? 0
+        return text(
+            "Today: \(active) running · \(formatCompactNumber(requests)) requests · \(formatCompactNumber(tokens)) tokens",
+            "\u{4ECA}\u{65E5}\u{FF1A}\(active) \u{8FDB}\u{884C}\u{4E2D} · \(formatCompactNumber(requests)) \u{8BF7}\u{6C42} · \(formatCompactNumber(tokens)) tokens"
         )
     }
 
@@ -345,7 +360,8 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
                 recentPerMinute: intValue(health["recentPerMinute"]) ?? 0,
                 recentCount: intValue(health["recentCount"]) ?? 0,
                 lastTestAt: health["lastTestAt"] as? String,
-                errorMessage: health["errorMessage"] as? String
+                errorMessage: health["errorMessage"] as? String,
+                limitInfo: health["limitInfo"] as? [String: Any]
             )
         }
     }
@@ -429,8 +445,10 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
     private func providerShortName(providerId: String?, modelId: String?) -> String {
         if let providerId, !providerId.isEmpty {
             if providerId == "codex-chatgpt-local" { return "Codex" }
+            if providerId == "claude-code-local" { return "Claude Code" }
             if providerId == "opencode-local" { return "OpenCode" }
             if providerId == "antigravity-local" { return "Antigravity" }
+            if providerId == "anthropic-api-key" || providerId.localizedCaseInsensitiveContains("anthropic") || providerId.localizedCaseInsensitiveContains("claude") { return "Claude" }
             if providerId.hasPrefix("upstream-") {
                 return text("Upstream", "\u{4E0A}\u{6E38}")
             }
@@ -438,8 +456,10 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         }
 
         let modelId = modelId ?? ""
+        if modelId.hasPrefix("claude-code/") { return "Claude Code" }
         if modelId.hasPrefix("opencode/") { return "OpenCode" }
         if modelId.hasPrefix("antigravity/") { return "Antigravity" }
+        if modelId.hasPrefix("claude-") { return "Claude" }
         if modelId.hasPrefix("gpt-") { return "Codex" }
         return text("Model", "\u{6A21}\u{578B}")
     }
@@ -539,6 +559,9 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         case "codex-chatgpt-local":
             menu.addItem(actionItem(text("Check / Configure Codex", "\u{68C0}\u{67E5} / \u{914D}\u{7F6E} Codex"), #selector(configureCodex)))
             menu.addItem(NSMenuItem.separator())
+        case "claude-code-local":
+            menu.addItem(actionItem(text("Check / Configure Claude Code", "\u{68C0}\u{67E5} / \u{914D}\u{7F6E} Claude Code"), #selector(configureClaudeCode)))
+            menu.addItem(NSMenuItem.separator())
         case "opencode-local":
             menu.addItem(actionItem(text("Check / Configure OpenCode", "\u{68C0}\u{67E5} / \u{914D}\u{7F6E} OpenCode"), #selector(configureOpenCode)))
             menu.addItem(NSMenuItem.separator())
@@ -565,6 +588,8 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         switch providerId {
         case "codex-chatgpt-local":
             return "Codex"
+        case "claude-code-local":
+            return "Claude Code"
         case "opencode-local":
             return "OpenCode"
         case "antigravity-local":
@@ -720,6 +745,9 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         menu.addItem(disabledItem(text("Model: \(channel.displayModel)", "\u{6A21}\u{578B}\u{FF1A}\(channel.displayModel)")))
         menu.addItem(disabledItem(text("Last test: \(lastTestTimeText(channel.lastTestAt))", "\u{6700}\u{8FD1}\u{6D4B}\u{8BD5}\u{FF1A}\(lastTestTimeText(channel.lastTestAt))")))
         menu.addItem(disabledItem(text("Status: \(channelStatusDetail(channel))", "\u{72B6}\u{6001}\u{FF1A}\(channelStatusDetail(channel))")))
+        if let limitText = channelLimitText(channel) {
+            menu.addItem(disabledItem(text("Limit: \(limitText)", "\u{9650}\u{989D}\u{FF1A}\(limitText)")))
+        }
         if let error = channel.errorMessage, !error.isEmpty {
             menu.addItem(disabledItem(text("Error: \(compactLabel(error, maxLength: 72))", "\u{9519}\u{8BEF}\u{FF1A}\(compactLabel(error, maxLength: 72))")))
         }
@@ -764,7 +792,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         let grouped = Dictionary(grouping: models) { model in
             providerShortName(providerId: model.providerId, modelId: model.id)
         }
-        let groupOrder = ["Codex", "OpenCode", "Antigravity", text("Upstream", "\u{4E0A}\u{6E38}")]
+        let groupOrder = ["Codex", "Claude Code", "OpenCode", "Antigravity", text("Upstream", "\u{4E0A}\u{6E38}")]
         let orderedGroups = grouped.keys.sorted { left, right in
             let leftIndex = groupOrder.firstIndex(of: left) ?? groupOrder.count
             let rightIndex = groupOrder.firstIndex(of: right) ?? groupOrder.count
@@ -837,7 +865,8 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
             return
         }
 
-        let command = "cd \(shellQuote(projectRoot.path)); codex"
+        let codexPath = findCodex() ?? "codex"
+        let command = "cd \(shellQuote(projectRoot.path)); \(shellQuote(codexPath))"
         runAppleScript("tell application \"Terminal\" to do script \(appleScriptString(command))")
         showAlert(title: text("Complete Codex login", "\u{8BF7}\u{5B8C}\u{6210} Codex \u{767B}\u{5F55}"), message: text("Terminal has been opened. In Codex, choose Sign in with ChatGPT, then return to LocalBrain and refresh status.", "\u{5DF2}\u{6253}\u{5F00}\u{7EC8}\u{7AEF}\u{3002}\u{8BF7}\u{5728} Codex \u{4E2D}\u{9009}\u{62E9} Sign in with ChatGPT\u{FF0C}\u{5B8C}\u{6210}\u{540E}\u{56DE}\u{5230} LocalBrain \u{5237}\u{65B0}\u{72B6}\u{6001}\u{3002}"))
     }
@@ -850,12 +879,29 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
             return
         }
 
-        let opencodePath = findOpenCode() ?? "/Users/wf/.opencode/bin/opencode"
+        let opencodePath = findOpenCode() ?? "\(NSHomeDirectory())/.opencode/bin/opencode"
         let command = FileManager.default.isExecutableFile(atPath: opencodePath)
             ? "\(shellQuote(opencodePath)) auth login"
             : "echo 'OpenCode CLI was not found. Install OpenCode first, then return to LocalBrain.'"
         runAppleScript("tell application \"Terminal\" to do script \(appleScriptString(command))")
         showAlert(title: text("Complete OpenCode setup", "\u{8BF7}\u{5B8C}\u{6210} OpenCode \u{914D}\u{7F6E}"), message: text("Terminal has been opened. Complete OpenCode login, then return to LocalBrain and refresh status.", "\u{5DF2}\u{6253}\u{5F00}\u{7EC8}\u{7AEF}\u{3002}\u{8BF7}\u{5B8C}\u{6210} OpenCode \u{767B}\u{5F55}\u{FF0C}\u{7136}\u{540E}\u{56DE}\u{5230} LocalBrain \u{5237}\u{65B0}\u{72B6}\u{6001}\u{3002}"))
+    }
+
+    @objc private func configureClaudeCode() {
+        let status = claudeCodeStatus()
+        if (status["ok"] as? Bool) == true {
+            let version = status["version"] as? String ?? "unknown"
+            showAlert(title: text("Claude Code is ready", "Claude Code \u{5DF2}\u{53EF}\u{7528}"), message: text("LocalBrain can use Claude Code through the local CLI. Version: \(version).", "LocalBrain \u{5DF2}\u{53EF}\u{901A}\u{8FC7}\u{672C}\u{673A} CLI \u{4F7F}\u{7528} Claude Code\u{3002}\u{7248}\u{672C}\u{FF1A}\(version)\u{3002}"))
+            refreshState()
+            return
+        }
+
+        let claudePath = findClaudeCode() ?? "\(NSHomeDirectory())/.local/bin/claude"
+        let command = FileManager.default.isExecutableFile(atPath: claudePath)
+            ? "\(shellQuote(claudePath)) auth login"
+            : "echo 'Claude Code CLI was not found. Install Claude Code first, then return to LocalBrain.'"
+        runAppleScript("tell application \"Terminal\" to do script \(appleScriptString(command))")
+        showAlert(title: text("Complete Claude Code login", "\u{8BF7}\u{5B8C}\u{6210} Claude Code \u{767B}\u{5F55}"), message: text("Terminal has been opened. Complete Claude Code login, then return to LocalBrain and refresh status.", "\u{5DF2}\u{6253}\u{5F00}\u{7EC8}\u{7AEF}\u{3002}\u{8BF7}\u{5B8C}\u{6210} Claude Code \u{767B}\u{5F55}\u{FF0C}\u{7136}\u{540E}\u{56DE}\u{5230} LocalBrain \u{5237}\u{65B0}\u{72B6}\u{6001}\u{3002}"))
     }
 
     @objc private func configureAntigravity() {
@@ -1068,8 +1114,8 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         let providerId = provider?["id"] as? String
         let name = NSTextField(string: provider?["displayName"] as? String ?? "")
         name.placeholderString = text("Source name", "\u{6765}\u{6E90}\u{540D}\u{79F0}")
-        let baseURL = NSTextField(string: provider?["baseUrl"] as? String ?? "https://api.openai.com/v1")
-        baseURL.placeholderString = "Base URL"
+        let baseURL = NSTextField(string: provider?["baseUrl"] as? String ?? "")
+        baseURL.placeholderString = "https://api.openai.com/v1 / https://api.anthropic.com/v1"
         upstreamBaseURLField = baseURL
         let apiKey = NSSecureTextField(string: "")
         apiKey.placeholderString = "API key"
@@ -1104,7 +1150,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         alert.messageText = providerId == nil
             ? text("Add upstream API key", "\u{6DFB}\u{52A0}\u{4E0A}\u{6E38} API Key")
             : text("Change upstream API key", "\u{66F4}\u{6539}\u{4E0A}\u{6E38} API Key")
-        alert.informativeText = text("LocalBrain will store this key locally and proxy compatible model calls through it.", "LocalBrain \u{4F1A}\u{5C06}\u{8FD9}\u{4E2A} Key \u{4FDD}\u{5B58}\u{5728}\u{672C}\u{5730}\u{FF0C}\u{5E76}\u{901A}\u{8FC7}\u{5B83}\u{4E2D}\u{8F6C}\u{6A21}\u{578B}\u{8BF7}\u{6C42}\u{3002}")
+        alert.informativeText = text("LocalBrain will store this key locally and proxy model calls through it. For Claude, use https://api.anthropic.com/v1.", "LocalBrain \u{4F1A}\u{5C06}\u{8FD9}\u{4E2A} Key \u{4FDD}\u{5B58}\u{5728}\u{672C}\u{5730}\u{FF0C}\u{5E76}\u{901A}\u{8FC7}\u{5B83}\u{4E2D}\u{8F6C}\u{6A21}\u{578B}\u{8BF7}\u{6C42}\u{3002}Claude \u{8BF7}\u{7528} https://api.anthropic.com/v1\u{3002}")
         alert.accessoryView = stack
         alert.addButton(withTitle: text("Add", "\u{6DFB}\u{52A0}"))
         alert.addButton(withTitle: text("Cancel", "\u{53D6}\u{6D88}"))
@@ -1205,6 +1251,26 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         ]
     }
 
+    private func claudeCodeStatus() -> [String: Any] {
+        guard let claudePath = findClaudeCode() else {
+            return ["ok": false, "reason": "missing-cli"]
+        }
+        let version = commandOutput(executable: claudePath, arguments: ["--version"], timeout: 2.0) ?? "unknown"
+        guard let authText = commandOutput(executable: claudePath, arguments: ["auth", "status", "--json"], timeout: 3.0),
+              let data = authText.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return ["ok": false, "hasCli": true, "version": version.trimmingCharacters(in: .whitespacesAndNewlines), "reason": "auth-status-failed"]
+        }
+        let loggedIn = (json["loggedIn"] as? Bool) == true
+        return [
+            "ok": loggedIn,
+            "hasCli": true,
+            "version": version.trimmingCharacters(in: .whitespacesAndNewlines),
+            "authMethod": json["authMethod"] as? String ?? "",
+            "subscriptionType": json["subscriptionType"] as? String ?? ""
+        ]
+    }
+
     private func opencodeStatus(state: [String: Any]) -> [String: Any] {
         let models = state["availableModels"] as? [String] ?? []
         let hasFreeModels = models.contains { $0.hasPrefix("opencode/") }
@@ -1262,6 +1328,30 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         }.resume()
         _ = sema.wait(timeout: .now() + timeout)
         return result
+    }
+
+    private func commandOutput(executable: String, arguments: [String], timeout: TimeInterval) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if process.isRunning {
+            process.terminate()
+            return nil
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)
     }
 
     private func coloredItem(title: String, ok: Bool, warning: Bool = false) -> NSMenuItem {
@@ -1329,12 +1419,51 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         return "\(Int(round(value * 100)))%"
     }
 
+    private func formatCompactNumber(_ value: Int) -> String {
+        if value >= 1_000_000 {
+            return String(format: "%.1fM", Double(value) / 1_000_000.0)
+        }
+        if value >= 10_000 {
+            return "\(Int(round(Double(value) / 1_000.0)))K"
+        }
+        return NumberFormatter.localizedString(from: NSNumber(value: value), number: .decimal)
+    }
+
     private func channelStatusDetail(_ channel: ChannelSummary) -> String {
         let status = channelHealthText(channelHealthLevel(channel))
         let duration = channel.durationMs.map { formatDuration($0) } ?? "-"
         let speed = formatSpeed(channel.tokensPerSecond)
         let success = formatSuccessRate(channel.successRate)
         return "\(status) · \(duration) · \(speed) · \(success) · \(channel.recentPerMinute)/min"
+    }
+
+    private func channelLimitText(_ channel: ChannelSummary) -> String? {
+        guard let info = channel.limitInfo else { return nil }
+        var parts: [String] = []
+        if let provider = info["provider"] as? String, !provider.isEmpty {
+            parts.append(text("source \(provider)", "\u{6765}\u{6E90} \(provider)"))
+        }
+        if let resetAt = info["resetAt"] as? String, let reset = formatDateTime(resetAt) {
+            parts.append(text("reset \(reset)", "\u{91CD}\u{7F6E} \(reset)"))
+        } else if let resetText = info["resetText"] as? String, !resetText.isEmpty {
+            parts.append(text("reset \(resetText)", "\u{91CD}\u{7F6E} \(resetText)"))
+        }
+        if let message = info["message"] as? String, !message.isEmpty {
+            parts.append(compactLabel(message, maxLength: 52))
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private func formatDateTime(_ value: String) -> String? {
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let date = iso.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+        guard let date else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: language == .chinese ? "zh_CN" : "en_US")
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
     }
 
     private func copy(_ text: String) {
@@ -1408,8 +1537,10 @@ private func shellQuote(_ value: String) -> String {
 }
 
 private func findNpm() -> String? {
+    let home = NSHomeDirectory()
     let candidates = [
-        "/Users/wf/.npm-global/bin/npm",
+        "\(home)/.npm-global/bin/npm",
+        "\(home)/.local/bin/npm",
         "/opt/homebrew/opt/node/bin/npm",
         "/opt/homebrew/bin/npm",
         "/usr/local/opt/node/bin/npm",
@@ -1419,19 +1550,66 @@ private func findNpm() -> String? {
     return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
 }
 
-private func findOpenCode() -> String? {
+private func findCodex() -> String? {
+    let home = NSHomeDirectory()
     let candidates = [
-        "/Users/wf/.opencode/bin/opencode",
+        "\(home)/.local/bin/codex",
+        "\(home)/.npm-global/bin/codex",
+        "/opt/homebrew/bin/codex",
+        "/usr/local/bin/codex"
+    ]
+    return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+}
+
+private func findOpenCode() -> String? {
+    let home = NSHomeDirectory()
+    let candidates = [
+        "\(home)/.opencode/bin/opencode",
+        "\(home)/.local/bin/opencode",
+        "\(home)/.npm-global/bin/opencode",
         "/opt/homebrew/bin/opencode",
         "/usr/local/bin/opencode"
     ]
     return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
 }
 
+private func findClaudeCode() -> String? {
+    if let managedPath = findManagedClaudeCode() {
+        return managedPath
+    }
+    let home = NSHomeDirectory()
+    let candidates = [
+        "\(home)/.local/bin/claude",
+        "\(home)/.npm-global/bin/claude",
+        "/opt/homebrew/bin/claude",
+        "/usr/local/bin/claude"
+    ]
+    return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+}
+
+private func findManagedClaudeCode() -> String? {
+    let root = "\(NSHomeDirectory())/Library/Application Support/Claude/claude-code"
+    let fileManager = FileManager.default
+    guard let versions = try? fileManager.contentsOfDirectory(atPath: root) else {
+        return nil
+    }
+    for version in versions.filter({ !$0.hasPrefix(".") }).sorted(by: { left, right in
+        left.localizedStandardCompare(right) == .orderedDescending
+    }) {
+        let candidate = "\(root)/\(version)/claude.app/Contents/MacOS/claude"
+        if fileManager.isExecutableFile(atPath: candidate) {
+            return candidate
+        }
+    }
+    return nil
+}
+
 private func processEnvironment() -> [String: String] {
     var env = ProcessInfo.processInfo.environment
+    let home = NSHomeDirectory()
     let pathParts = [
-        "/Users/wf/.npm-global/bin",
+        "\(home)/.local/bin",
+        "\(home)/.npm-global/bin",
         "/opt/homebrew/opt/node/bin",
         "/opt/homebrew/bin",
         "/usr/local/opt/node/bin",

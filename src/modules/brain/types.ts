@@ -12,6 +12,8 @@ export type BrainTaskKind =
 export type BrainProviderKind =
   | 'mock'
   | 'openai-api-key'
+  | 'anthropic-api-key'
+  | 'claude-code-local'
   | 'vercel-ai-sdk'
   | 'custom-http'
   | 'opencode-local'

@@ -1,7 +1,7 @@
 {
   "defaultProvider": "codex-chatgpt-local",
   "defaultModel": "gpt-5.4-mini",
-  "models": ["gpt-5.4-mini", "gpt-5.5"],
+  "models": ["gpt-5.4-mini", "gpt-5.5", "claude-code/sonnet", "claude-code/opus"],
   "providers": {
     "codex-chatgpt-local": {
       "type": "codex-chatgpt-local",
@@ -10,11 +10,20 @@
       "localOnly": false,
       "experimental": true,
       "options": {
-        "authPath": "/Users/wf/.codex/auth.json",
-        "cliPath": "/opt/homebrew/bin/codex",
         "clientId": "app_EMoamEEZ73f0CkXaXp7hrann",
         "userAgent": "brain-local-codex-provider/0.1",
         "modelCacheTtlMs": 60000
+      }
+    },
+    "claude-code-local": {
+      "type": "claude-code-local",
+      "displayName": "Claude Code Local Provider",
+      "localOnly": true,
+      "experimental": true,
+      "options": {
+        "timeoutMs": 900000,
+        "modelCacheTtlMs": 60000,
+        "settingSources": "project,local"
       }
     },
     "opencode-local": {
@@ -24,7 +33,6 @@
       "localOnly": true,
       "experimental": true,
       "options": {
-        "cliPath": "/Users/wf/.opencode/bin/opencode",
         "modelProvider": "opencode"
       }
     },
@@ -34,10 +42,7 @@
       "localOnly": false,
       "experimental": true,
       "options": {
-        "stateDbPath": "/Users/wf/Library/Application Support/Antigravity/User/globalStorage/state.vscdb",
         "sqlitePath": "sqlite3",
-        "imageOutputDir": "/Users/wf/LocalBrain/logs/antigravity-images",
-        "workspaceUri": "file:///Users/wf/LocalBrain",
         "modelCacheTtlMs": 60000
       }
     }

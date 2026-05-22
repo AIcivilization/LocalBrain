@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
+import { constants as fsConstants } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { access } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -80,7 +82,7 @@ export class CodexChatGptLocalProvider implements BrainProvider {
   readonly kind = 'codex-chatgpt-local' as const;
   private readonly authPath: string;
   private readonly endpoint: string;
-  private readonly cliPath: string;
+  private readonly configuredCliPath?: string;
   private readonly clientId: string;
   private readonly displayName: string;
   private readonly refreshSkewSeconds: number;
@@ -96,7 +98,7 @@ export class CodexChatGptLocalProvider implements BrainProvider {
     this.id = options.id;
     this.authPath = options.authPath ?? path.join(os.homedir(), '.codex', 'auth.json');
     this.endpoint = options.endpoint ?? DEFAULT_ENDPOINT;
-    this.cliPath = options.cliPath ?? 'codex';
+    this.configuredCliPath = options.cliPath;
     this.clientId = options.clientId ?? DEFAULT_CLIENT_ID;
     this.displayName = options.displayName ?? 'Codex ChatGPT Local Provider';
     this.refreshSkewSeconds = options.refreshSkewSeconds ?? 300;
@@ -122,7 +124,8 @@ export class CodexChatGptLocalProvider implements BrainProvider {
       return this.modelCache.models;
     }
 
-    const { stdout } = await execFileAsync(this.cliPath, ['debug', 'models'], {
+    const cliPath = await resolveCodexCliPath(this.configuredCliPath);
+    const { stdout } = await execFileAsync(cliPath, ['debug', 'models'], {
       timeout: 10_000,
       maxBuffer: 16 * 1024 * 1024,
     });
@@ -270,6 +273,34 @@ export class CodexChatGptLocalProvider implements BrainProvider {
 
     await atomicWriteJson(this.authPath, nextAuth);
     return nextAuth;
+  }
+}
+
+async function resolveCodexCliPath(configuredCliPath?: string): Promise<string> {
+  if (configuredCliPath && await isExecutable(configuredCliPath)) {
+    return configuredCliPath;
+  }
+
+  for (const candidate of [
+    path.join(os.homedir(), '.local', 'bin', 'codex'),
+    path.join(os.homedir(), '.npm-global', 'bin', 'codex'),
+    '/opt/homebrew/bin/codex',
+    '/usr/local/bin/codex',
+    'codex',
+  ]) {
+    if (candidate === 'codex' || await isExecutable(candidate)) {
+      return candidate;
+    }
+  }
+  return 'codex';
+}
+
+async function isExecutable(value: string): Promise<boolean> {
+  try {
+    await access(value, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
   }
 }
 

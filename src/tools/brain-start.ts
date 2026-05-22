@@ -50,6 +50,7 @@ async function ensureLocalConfig(configPath: string, sourcePath: string): Promis
     await access(configPath);
     await mergeConfigDefaults(configPath, sourcePath);
     await removeDeepSeekWebConfig(configPath);
+    await normalizePortableProviderConfig(configPath);
     return;
   } catch {
     // Create the config below.
@@ -72,6 +73,7 @@ async function ensureLocalConfig(configPath: string, sourcePath: string): Promis
   await mkdir(path.dirname(configPath), { recursive: true });
   await writeFile(configPath, `${JSON.stringify(localConfig, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
   await removeDeepSeekWebConfig(configPath);
+  await normalizePortableProviderConfig(configPath);
 
   console.log('Created LocalBrain config');
   console.log(`Config:         ${configPath}`);
@@ -128,6 +130,94 @@ async function mergeConfigDefaults(configPath: string, sourcePath: string): Prom
     models: [...nextModels],
   };
   await writeFile(configPath, `${JSON.stringify(nextConfig, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+}
+
+async function normalizePortableProviderConfig(configPath: string): Promise<void> {
+  const config = JSON.parse(await readFile(configPath, 'utf8')) as BrainConfig;
+  let changed = false;
+
+  for (const providerConfig of Object.values(config.providers ?? {})) {
+    const options = providerConfig.options ?? {};
+    if (providerConfig.type === 'claude-code-local') {
+      const cliPath = typeof options.cliPath === 'string' ? options.cliPath : '';
+      if (isClaudeManagedVersionPath(cliPath)) {
+        delete options.cliPath;
+        providerConfig.options = options;
+        changed = true;
+      }
+      continue;
+    }
+
+    if (providerConfig.type === 'codex-chatgpt-local') {
+      if (isUserHomePath(options.authPath, '.codex/auth.json')) {
+        delete options.authPath;
+        providerConfig.options = options;
+        changed = true;
+      }
+      if (isKnownCodexCliPath(options.cliPath)) {
+        delete options.cliPath;
+        providerConfig.options = options;
+        changed = true;
+      }
+      continue;
+    }
+
+    if (providerConfig.type === 'opencode-local') {
+      if (isUserHomePath(options.cliPath, '.opencode/bin/opencode')) {
+        delete options.cliPath;
+        providerConfig.options = options;
+        changed = true;
+      }
+      continue;
+    }
+
+    if (providerConfig.type === 'antigravity-local') {
+      if (isUserHomePath(options.stateDbPath, 'Library/Application Support/Antigravity/User/globalStorage/state.vscdb')) {
+        delete options.stateDbPath;
+        providerConfig.options = options;
+        changed = true;
+      }
+      if (isOldLocalBrainProjectPath(options.imageOutputDir) || isOldLocalBrainFileUri(options.workspaceUri)) {
+        delete options.imageOutputDir;
+        delete options.workspaceUri;
+        providerConfig.options = options;
+        changed = true;
+      }
+    }
+  }
+
+  if (changed) {
+    await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  }
+}
+
+function isClaudeManagedVersionPath(value: string): boolean {
+  return value.includes('/Library/Application Support/Claude/claude-code/')
+    && value.endsWith('/claude.app/Contents/MacOS/claude');
+}
+
+function isUserHomePath(value: unknown, suffix: string): boolean {
+  return typeof value === 'string'
+    && /^\/Users\/[^/]+\//.test(value)
+    && value.endsWith(`/${suffix}`);
+}
+
+function isOldLocalBrainProjectPath(value: unknown): boolean {
+  return typeof value === 'string' && /^\/Users\/[^/]+\/LocalBrain\//.test(value);
+}
+
+function isOldLocalBrainFileUri(value: unknown): boolean {
+  return typeof value === 'string' && /^file:\/\/\/Users\/[^/]+\/LocalBrain/.test(value);
+}
+
+function isKnownCodexCliPath(value: unknown): boolean {
+  return typeof value === 'string'
+    && (
+      value === '/opt/homebrew/bin/codex'
+      || value === '/usr/local/bin/codex'
+      || isUserHomePath(value, '.local/bin/codex')
+      || isUserHomePath(value, '.npm-global/bin/codex')
+    );
 }
 
 async function removeDeepSeekWebConfig(configPath: string): Promise<void> {
