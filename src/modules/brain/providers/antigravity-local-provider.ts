@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { mkdir, readFile } from 'node:fs/promises';
 import http2 from 'node:http2';
 import os from 'node:os';
@@ -20,21 +21,16 @@ import type {
 
 const execFileAsync = promisify(execFile);
 
-const DEFAULT_STATE_DB_PATH = path.join(
-  os.homedir(),
-  'Library',
-  'Application Support',
-  'Antigravity',
-  'User',
-  'globalStorage',
-  'state.vscdb',
-);
+const DEFAULT_STATE_DB_PATHS = [
+  path.join(os.homedir(), 'Library', 'Application Support', 'Antigravity IDE', 'User', 'globalStorage', 'state.vscdb'),
+  path.join(os.homedir(), 'Library', 'Application Support', 'Antigravity', 'User', 'globalStorage', 'state.vscdb'),
+];
 
 const KNOWN_ANTIGRAVITY_MODELS: Array<{ displayName: string; id: string; enumNumber: number; free?: boolean }> = [
   {
     displayName: 'Gemini 3.5 Flash (High)',
     id: 'antigravity/gemini-3.5-flash-high',
-    enumNumber: 1132,
+    enumNumber: 1149,
   },
   {
     displayName: 'Gemini 3.5 Flash (Medium)',
@@ -42,9 +38,14 @@ const KNOWN_ANTIGRAVITY_MODELS: Array<{ displayName: string; id: string; enumNum
     enumNumber: 1020,
   },
   {
+    displayName: 'Gemini 3.5 Flash (Low)',
+    id: 'antigravity/gemini-3.5-flash-low',
+    enumNumber: 1187,
+  },
+  {
     displayName: 'Gemini 3.1 Pro (High)',
     id: 'antigravity/gemini-3.1-pro-high',
-    enumNumber: 1016,
+    enumNumber: 1037,
   },
   {
     displayName: 'Gemini 3.1 Pro (Low)',
@@ -54,7 +55,7 @@ const KNOWN_ANTIGRAVITY_MODELS: Array<{ displayName: string; id: string; enumNum
   {
     displayName: 'Gemini 3 Flash',
     id: 'antigravity/gemini-3-flash',
-    enumNumber: 1047,
+    enumNumber: 1018,
   },
   {
     displayName: 'Claude Sonnet 4.6 (Thinking)',
@@ -90,6 +91,10 @@ interface AntigravityAuthStatus {
   userStatusProtoBinaryBase64?: string;
 }
 
+function defaultStateDbPath(): string {
+  return DEFAULT_STATE_DB_PATHS.find((candidate) => existsSync(candidate)) ?? DEFAULT_STATE_DB_PATHS[0];
+}
+
 export class AntigravityLocalBrainProvider implements BrainProvider {
   readonly id: string;
   readonly kind = 'antigravity-local' as const;
@@ -110,7 +115,7 @@ export class AntigravityLocalBrainProvider implements BrainProvider {
   constructor(options: AntigravityLocalProviderOptions) {
     this.id = options.id;
     this.displayName = options.displayName ?? 'Antigravity Local Provider';
-    this.stateDbPath = options.stateDbPath ?? DEFAULT_STATE_DB_PATH;
+    this.stateDbPath = options.stateDbPath ?? defaultStateDbPath();
     this.sqlitePath = options.sqlitePath ?? 'sqlite3';
     this.httpsServerPort = options.httpsServerPort;
     this.csrfToken = options.csrfToken;
@@ -271,20 +276,20 @@ export class AntigravityLocalBrainProvider implements BrainProvider {
 
     const { stdout } = await execFileAsync('ps', ['aux'], {
       timeout: 10_000,
-      maxBuffer: 1024 * 1024,
+      maxBuffer: 8 * 1024 * 1024,
     });
     const processLines = stdout
       .split(/\r?\n/)
-      .filter((line) => line.includes('language_server_macos_arm'))
+      .filter((line) => line.includes('language_server') && line.includes('--csrf_token'))
       .sort((left, right) => Number(right.includes('--enable_lsp')) - Number(left.includes('--enable_lsp')));
     for (const line of processLines) {
       const httpsServerPort = matchProcessArg(line, '--https_server_port');
       const extensionServerPort = matchProcessArg(line, '--extension_server_port');
       const csrfToken = matchProcessArg(line, '--csrf_token');
-      const port = Number(
-        httpsServerPort
-        ?? (await resolveLanguageServerHttpsPort(matchProcessPid(line), extensionServerPort)),
-      );
+      const configuredPort = Number(httpsServerPort);
+      const port = Number.isInteger(configuredPort) && configuredPort > 0
+        ? configuredPort
+        : Number(await resolveLanguageServerHttpsPort(matchProcessPid(line), extensionServerPort));
       if (Number.isInteger(port) && port > 0 && csrfToken) {
         return {
           port,

@@ -44,6 +44,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
     private var serverLogHandle: FileHandle?
     private var showKeys = false
     private var lastState: [String: Any] = [:]
+    private var refreshFailureCount = 0
     private var timer: Timer?
     private weak var upstreamApiKeyField: NSSecureTextField?
     private weak var upstreamBaseURLField: NSTextField?
@@ -125,7 +126,22 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
     }
 
     private func refreshState() {
-        var state = fetchJSON(url: "http://127.0.0.1:8787/brain/local-state") ?? [:]
+        guard var state = fetchJSON(url: "http://127.0.0.1:8787/brain/local-state") else {
+            refreshFailureCount += 1
+            if !lastState.isEmpty && refreshFailureCount < 3 {
+                var staleState = lastState
+                staleState["stale"] = true
+                lastState = staleState
+                updateStatusTitle()
+                rebuildMenu()
+                return
+            }
+            lastState = ["ok": false, "stale": true]
+            updateStatusTitle()
+            rebuildMenu()
+            return
+        }
+        refreshFailureCount = 0
         state["codex"] = codexStatus()
         state["claudeCode"] = claudeCodeStatus()
         state["opencode"] = opencodeStatus(state: state)
@@ -240,9 +256,10 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         let active = intValue(today["activeRequests"]) ?? ((usage["active"] as? [[String: Any]])?.count ?? 0)
         let requests = intValue(today["requestCount"]) ?? 0
         let tokens = intValue(today["totalTokens"]) ?? 0
+        let activeText = active > 0 ? text("\(active) running", "\(active) \u{8FDB}\u{884C}\u{4E2D}") : text("idle", "\u{7A7A}\u{95F2}")
         return text(
-            "Today: \(active) running · \(formatCompactNumber(requests)) requests · \(formatCompactNumber(tokens)) tokens",
-            "\u{4ECA}\u{65E5}\u{FF1A}\(active) \u{8FDB}\u{884C}\u{4E2D} · \(formatCompactNumber(requests)) \u{8BF7}\u{6C42} · \(formatCompactNumber(tokens)) tokens"
+            "Today: \(activeText) · \(formatCompactNumber(requests)) requests · \(formatCompactNumber(tokens)) tokens",
+            "\u{4ECA}\u{65E5}\u{FF1A}\(activeText) · \(formatCompactNumber(requests)) \u{8BF7}\u{6C42} · \(formatCompactNumber(tokens)) tokens"
         )
     }
 

@@ -2541,6 +2541,7 @@ function renderConsoleHtml(): string {
         todayUsage: 'Today',
         currentRunning: 'Running now',
         activeRequests: 'running',
+        idle: 'Idle',
         todayRequests: 'Requests',
         todayTokens: 'tokens',
         tokenColumn: 'Tokens',
@@ -2659,6 +2660,7 @@ function renderConsoleHtml(): string {
         todayUsage: '今日',
         currentRunning: '正在运行',
         activeRequests: '进行中',
+        idle: '空闲',
         todayRequests: '请求',
         todayTokens: 'tokens',
         tokenColumn: 'Token',
@@ -2828,12 +2830,13 @@ function renderConsoleHtml(): string {
         seen.add(log.apiKeyFingerprint);
         active.push(log.apiKeyLabel || labelsByFingerprint.get(log.apiKeyFingerprint) || log.apiKeyFingerprint);
       }
-      return active.length > 0 ? active.slice(0, 4).join(', ') : '0';
+      return active.length > 0 ? active.slice(0, 4).join(', ') : t('idle');
     }
     function usageSummaryText() {
       const today = state?.usage?.today || {};
       const active = today.activeRequests || state?.usage?.active?.length || 0;
-      return String(active) + ' ' + t('activeRequests') + ' · ' + formatInt(today.requestCount || 0) + ' ' + t('todayRequests') + ' · ' + formatTokens(today.totalTokens || 0);
+      const activeText = active > 0 ? String(active) + ' ' + t('activeRequests') : t('idle');
+      return activeText + ' · ' + formatInt(today.requestCount || 0) + ' ' + t('todayRequests') + ' · ' + formatTokens(today.totalTokens || 0);
     }
     function channelUsageByKey() {
       const rows = state?.usage?.today?.channels || [];
@@ -3498,11 +3501,28 @@ function renderConsoleHtml(): string {
       renderModelSpeed();
       renderModels();
     });
+    let refreshInFlight = false;
+    async function refreshSafely() {
+      if (refreshInFlight) return;
+      refreshInFlight = true;
+      try {
+        await refresh();
+      } catch (error) {
+        $('status').textContent = 'Error';
+        console.error(error);
+      } finally {
+        refreshInFlight = false;
+      }
+    }
     applyLanguage();
-    refresh().catch((error) => {
-      $('status').textContent = 'Error';
-      console.error(error);
+    refreshSafely();
+    setInterval(() => {
+      if (!document.hidden) refreshSafely();
+    }, 10000);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) refreshSafely();
     });
+    window.addEventListener('focus', () => refreshSafely());
   </script>
 </body>
 </html>`;
