@@ -15,6 +15,7 @@ import type {
   BrainProviderRequest,
   BrainProviderResponse,
 } from '../types.ts';
+import { fetchViaHttpProxy, proxyEnvironment, requireForcedProxyUrl } from './proxy.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -72,6 +73,8 @@ export interface CodexChatGptLocalProviderOptions {
   refreshSkewSeconds?: number;
   userAgent?: string;
   modelCacheTtlMs?: number;
+  proxyUrl?: string;
+  forceProxy?: boolean;
 }
 
 const DEFAULT_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
@@ -88,6 +91,8 @@ export class CodexChatGptLocalProvider implements BrainProvider {
   private readonly refreshSkewSeconds: number;
   private readonly userAgent: string;
   private readonly modelCacheTtlMs: number;
+  private readonly proxyUrl?: string;
+  private readonly forceProxy: boolean;
   private refreshInFlight?: Promise<CodexAuthJson>;
   private modelCache?: {
     expiresAt: number;
@@ -104,6 +109,8 @@ export class CodexChatGptLocalProvider implements BrainProvider {
     this.refreshSkewSeconds = options.refreshSkewSeconds ?? 300;
     this.userAgent = options.userAgent ?? 'brain-local-codex-provider/0.1';
     this.modelCacheTtlMs = options.modelCacheTtlMs ?? 60_000;
+    this.proxyUrl = options.proxyUrl;
+    this.forceProxy = options.forceProxy ?? true;
   }
 
   describe(): BrainProviderDescriptor {
@@ -128,6 +135,7 @@ export class CodexChatGptLocalProvider implements BrainProvider {
     const { stdout } = await execFileAsync(cliPath, ['debug', 'models'], {
       timeout: 10_000,
       maxBuffer: 16 * 1024 * 1024,
+      env: this.forceProxy ? proxyEnvironment(process.env, this.requireProxyUrl()) : process.env,
     });
     const catalog = JSON.parse(stdout) as CodexModelCatalog;
     const models = (catalog.models ?? [])
@@ -158,7 +166,7 @@ export class CodexChatGptLocalProvider implements BrainProvider {
       throw new Error(`Codex auth at ${this.authPath} does not contain a ChatGPT account id`);
     }
 
-    const response = await fetch(this.endpoint, {
+    const response = await this.providerFetch(this.endpoint, {
       method: 'POST',
       headers: {
         authorization: `Bearer ${accessToken}`,
@@ -174,6 +182,7 @@ export class CodexChatGptLocalProvider implements BrainProvider {
         'user-agent': this.userAgent,
       },
       body: JSON.stringify(toCodexResponsesPayload(request)),
+      timeoutMs: 180_000,
     });
 
     if (!response.ok) {
@@ -238,7 +247,7 @@ export class CodexChatGptLocalProvider implements BrainProvider {
       throw new Error('Codex auth has no refresh token');
     }
 
-    const response = await fetch('https://auth.openai.com/oauth/token', {
+    const response = await this.providerFetch('https://auth.openai.com/oauth/token', {
       method: 'POST',
       headers: {
         'content-type': 'application/x-www-form-urlencoded',
@@ -248,6 +257,7 @@ export class CodexChatGptLocalProvider implements BrainProvider {
         grant_type: 'refresh_token',
         refresh_token: refreshToken,
       }),
+      timeoutMs: 60_000,
     });
 
     if (!response.ok) {
@@ -273,6 +283,26 @@ export class CodexChatGptLocalProvider implements BrainProvider {
 
     await atomicWriteJson(this.authPath, nextAuth);
     return nextAuth;
+  }
+
+  private requireProxyUrl(): string {
+    return requireForcedProxyUrl('Codex', this.proxyUrl);
+  }
+
+  private async providerFetch(url: string, init: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string | URLSearchParams;
+    timeoutMs?: number;
+  }): Promise<{ ok: boolean; status: number; text(): Promise<string>; json(): Promise<unknown> }> {
+    if (this.forceProxy) {
+      return await fetchViaHttpProxy(url, init, this.requireProxyUrl());
+    }
+    return await fetch(url, {
+      method: init.method,
+      headers: init.headers,
+      body: init.body,
+    });
   }
 }
 

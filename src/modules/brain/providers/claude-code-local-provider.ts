@@ -1,8 +1,9 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { constants as fsConstants } from 'node:fs';
-import { access, mkdir, readdir } from 'node:fs/promises';
+import { access, mkdir, readdir, readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 
 import type {
   BrainMessage,
@@ -12,6 +13,19 @@ import type {
   BrainProviderRequest,
   BrainProviderResponse,
 } from '../types.ts';
+import { fetchViaHttpProxy, proxyEnvironment, requireForcedProxyUrl } from './proxy.ts';
+
+const execFileAsync = promisify(execFile);
+
+// Anthropic exposes the live model catalog here; Claude Code has no `models`
+// subcommand, so we read it directly with the CLI's OAuth token.
+const CLAUDE_MODELS_ENDPOINT = 'https://api.anthropic.com/v1/models';
+// Family aliases the CLI resolves to the latest model (e.g. `opus` -> newest
+// Opus). Used when live discovery is unavailable (logged out / offline) so the
+// gateway keeps working. Kept minimal and long-lived on purpose.
+const CLAUDE_FALLBACK_FAMILIES = ['opus', 'sonnet', 'haiku', 'fable'];
+// Preferred display order for discovered families; unknown families sort after.
+const CLAUDE_FAMILY_ORDER = ['opus', 'sonnet', 'haiku', 'fable'];
 
 export interface ClaudeCodeLocalProviderOptions {
   id: string;
@@ -21,6 +35,8 @@ export interface ClaudeCodeLocalProviderOptions {
   timeoutMs?: number;
   modelCacheTtlMs?: number;
   settingSources?: string;
+  proxyUrl?: string;
+  forceProxy?: boolean;
   experimental?: boolean;
 }
 
@@ -46,6 +62,8 @@ export class ClaudeCodeLocalProvider implements BrainProvider {
   private readonly timeoutMs: number;
   private readonly modelCacheTtlMs: number;
   private readonly settingSources?: string;
+  private readonly proxyUrl?: string;
+  private readonly forceProxy: boolean;
   private readonly experimental: boolean;
   private modelCache?: {
     expiresAt: number;
@@ -60,6 +78,8 @@ export class ClaudeCodeLocalProvider implements BrainProvider {
     this.timeoutMs = options.timeoutMs ?? 900_000;
     this.modelCacheTtlMs = options.modelCacheTtlMs ?? 60_000;
     this.settingSources = options.settingSources;
+    this.proxyUrl = options.proxyUrl;
+    this.forceProxy = options.forceProxy ?? true;
     this.experimental = options.experimental ?? true;
   }
 
@@ -81,24 +101,85 @@ export class ClaudeCodeLocalProvider implements BrainProvider {
       return this.modelCache.models;
     }
 
-    const models: BrainModelDescriptor[] = [
-      {
-        id: 'claude-code/sonnet',
-        providerId: this.id,
-        displayName: 'Claude Code Sonnet',
-      },
-      {
-        id: 'claude-code/opus',
-        providerId: this.id,
-        displayName: 'Claude Code Opus',
-      },
-    ];
+    // Prefer the live catalog so new model families appear automatically and
+    // upgrades never require a code change. Fall back to stable family aliases
+    // when the user is logged out or the request fails, so listing never throws
+    // and the gateway stays usable.
+    let models: BrainModelDescriptor[] | undefined;
+    try {
+      models = await this.discoverModels();
+    } catch (error) {
+      // Being signed out is the normal, quiet path. Anything else (e.g. the API
+      // rejecting the token) is worth surfacing so the live path can be fixed
+      // instead of silently degrading to the fallback forever.
+      if (!(error instanceof SignedOutError)) {
+        console.warn(`[${this.id}] live model discovery failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      models = undefined;
+    }
+    if (!models || models.length === 0) {
+      models = CLAUDE_FALLBACK_FAMILIES.map((family) => this.familyDescriptor(family));
+    }
 
     this.modelCache = {
       expiresAt: now + this.modelCacheTtlMs,
       models,
     };
     return models;
+  }
+
+  private familyDescriptor(family: string): BrainModelDescriptor {
+    return {
+      id: `claude-code/${family}`,
+      providerId: this.id,
+      displayName: `Claude Code ${capitalize(family)}`,
+    };
+  }
+
+  private async discoverModels(): Promise<BrainModelDescriptor[]> {
+    const token = await readClaudeOAuthToken();
+    if (!token || !token.accessToken) {
+      throw new SignedOutError('Claude Code is not signed in (no OAuth token found)');
+    }
+    if (token.expiresAt && token.expiresAt <= Date.now()) {
+      throw new SignedOutError('Claude Code OAuth token has expired');
+    }
+
+    const catalog = await this.fetchModelCatalog(token.accessToken);
+    const families: string[] = [];
+    const seen = new Set<string>();
+    for (const entry of catalog) {
+      const family = claudeModelFamily(entry.id);
+      if (!family || seen.has(family)) {
+        continue;
+      }
+      seen.add(family);
+      families.push(family);
+    }
+    return sortClaudeFamilies(families).map((family) => this.familyDescriptor(family));
+  }
+
+  private async fetchModelCatalog(accessToken: string): Promise<Array<{ id: string }>> {
+    const init = {
+      method: 'GET',
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        'anthropic-beta': 'oauth-2025-04-20',
+        'anthropic-version': '2023-06-01',
+      },
+      timeoutMs: 15_000,
+    };
+    const url = `${CLAUDE_MODELS_ENDPOINT}?limit=1000`;
+    const response = this.forceProxy
+      ? await fetchViaHttpProxy(url, init, this.requireProxyUrl())
+      : await fetchDirect(url, init);
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Claude models request failed: ${response.status} ${text.slice(0, 200)}`);
+    }
+    const payload = await response.json() as { data?: Array<{ id?: unknown }> };
+    return (payload.data ?? [])
+      .filter((entry): entry is { id: string } => typeof entry.id === 'string');
   }
 
   async generate(request: BrainProviderRequest): Promise<BrainProviderResponse> {
@@ -131,7 +212,7 @@ export class ClaudeCodeLocalProvider implements BrainProvider {
       timeout: this.timeoutMs,
       maxBuffer: 32 * 1024 * 1024,
       env: {
-        ...process.env,
+        ...(this.forceProxy ? proxyEnvironment(process.env, this.requireProxyUrl()) : process.env),
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC ?? '1',
       },
     });
@@ -165,6 +246,10 @@ export class ClaudeCodeLocalProvider implements BrainProvider {
         sessionId: payload.session_id,
       },
     };
+  }
+
+  private requireProxyUrl(): string {
+    return requireForcedProxyUrl('Claude Code', this.proxyUrl);
   }
 }
 
@@ -367,5 +452,117 @@ function parseClaudeCodeJson(stdout: string): ClaudeCodeJsonResult {
       is_error: false,
       result: stdout.trim(),
     };
+  }
+}
+
+// Signals the expected "no usable login" case so callers can stay quiet about
+// it while still logging genuine discovery failures.
+class SignedOutError extends Error {}
+
+interface ClaudeOAuthToken {
+  accessToken: string;
+  expiresAt?: number;
+}
+
+// Reads the Claude Code subscription OAuth token. Newer installs keep it in the
+// macOS Keychain under the `Claude Code-credentials` service; some setups use a
+// `~/.claude/.credentials.json` file. Both hold `{ claudeAiOauth: {...} }`.
+async function readClaudeOAuthToken(): Promise<ClaudeOAuthToken | undefined> {
+  const fileToken = await readOAuthTokenFromFile();
+  if (fileToken) {
+    return fileToken;
+  }
+  if (process.platform === 'darwin') {
+    return readOAuthTokenFromKeychain();
+  }
+  return undefined;
+}
+
+async function readOAuthTokenFromFile(): Promise<ClaudeOAuthToken | undefined> {
+  try {
+    const text = await readFile(path.join(os.homedir(), '.claude', '.credentials.json'), 'utf8');
+    return parseOAuthCredentials(text);
+  } catch {
+    return undefined;
+  }
+}
+
+async function readOAuthTokenFromKeychain(): Promise<ClaudeOAuthToken | undefined> {
+  try {
+    const { stdout } = await execFileAsync(
+      'security',
+      ['find-generic-password', '-s', 'Claude Code-credentials', '-w'],
+      { timeout: 5_000, maxBuffer: 1024 * 1024 },
+    );
+    return parseOAuthCredentials(stdout);
+  } catch {
+    return undefined;
+  }
+}
+
+function parseOAuthCredentials(text: string): ClaudeOAuthToken | undefined {
+  try {
+    const json = JSON.parse(text.trim()) as {
+      claudeAiOauth?: { accessToken?: unknown; expiresAt?: unknown };
+    };
+    const oauth = json.claudeAiOauth;
+    if (!oauth || typeof oauth.accessToken !== 'string' || oauth.accessToken.length === 0) {
+      return undefined;
+    }
+    return {
+      accessToken: oauth.accessToken,
+      expiresAt: typeof oauth.expiresAt === 'number' ? oauth.expiresAt : undefined,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+// Extracts the model family (`claude-opus-4-8` -> `opus`) so upgrades within a
+// family collapse onto a single always-latest alias. Rejects purely-numeric
+// segments so legacy `claude-3-5-sonnet-*` ids don't produce a bogus `3` alias.
+function claudeModelFamily(id: string): string | undefined {
+  const family = /^claude-([a-z0-9]+)-/.exec(id)?.[1];
+  if (!family || /^[0-9]+$/.test(family)) {
+    return undefined;
+  }
+  return family;
+}
+
+function sortClaudeFamilies(families: string[]): string[] {
+  const rank = (family: string): number => {
+    const index = CLAUDE_FAMILY_ORDER.indexOf(family);
+    return index === -1 ? CLAUDE_FAMILY_ORDER.length : index;
+  };
+  return [...families].sort((left, right) => {
+    const delta = rank(left) - rank(right);
+    return delta !== 0 ? delta : left.localeCompare(right);
+  });
+}
+
+function capitalize(value: string): string {
+  return value.length === 0 ? value : `${value[0].toUpperCase()}${value.slice(1)}`;
+}
+
+async function fetchDirect(
+  url: string,
+  init: { method?: string; headers?: Record<string, string>; timeoutMs?: number },
+): Promise<{ ok: boolean; status: number; text(): Promise<string>; json(): Promise<unknown> }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), init.timeoutMs ?? 15_000);
+  try {
+    const response = await fetch(url, {
+      method: init.method,
+      headers: init.headers,
+      signal: controller.signal,
+    });
+    return {
+      ok: response.ok,
+      status: response.status,
+      text: () => response.text(),
+      json: () => response.json(),
+    };
+  } finally {
+    clearTimeout(timer);
   }
 }

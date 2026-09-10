@@ -1797,6 +1797,18 @@ function readableProviderName(providerId?: string, model?: string, message?: str
   if (providerId === 'antigravity-local' || model?.startsWith('antigravity/')) {
     return 'Antigravity';
   }
+  if (providerId === 'grok-local' || model?.startsWith('grok/')) {
+    return 'Grok';
+  }
+  if (providerId === 'qoder-local' || model?.startsWith('qoder/')) {
+    return 'Qoder';
+  }
+  if (providerId === 'workbuddy-ai-local' || model?.startsWith('workbuddy-ai/')) {
+    return 'WorkBuddy AI';
+  }
+  if (providerId === 'workbuddy-local' || model?.startsWith('workbuddy/')) {
+    return 'WorkBuddy';
+  }
   if (providerId === 'anthropic-api-key' || model?.startsWith('claude-')) {
     return 'Claude';
   }
@@ -2864,12 +2876,20 @@ function renderConsoleHtml(): string {
       if (providerId === 'claude-code-local') return 'Claude Code';
       if (providerId === 'opencode-local') return 'OpenCode';
       if (providerId === 'antigravity-local') return 'Antigravity';
+      if (providerId === 'grok-local') return 'Grok';
+      if (providerId === 'qoder-local') return 'Qoder';
+      if (providerId === 'workbuddy-ai-local') return 'WorkBuddy AI';
+      if (providerId === 'workbuddy-local') return 'WorkBuddy';
       if (providerId === 'anthropic-api-key' || String(providerId || '').includes('anthropic') || String(providerId || '').includes('claude')) return 'Claude';
       if (providerId) return t('upstreamApiKeys');
       if (String(modelId || '').startsWith('claude-code/')) return 'Claude Code';
       if (String(modelId || '').startsWith('claude-')) return 'Claude';
       if (String(modelId || '').startsWith('opencode/')) return 'OpenCode';
       if (String(modelId || '').startsWith('antigravity/')) return 'Antigravity';
+      if (String(modelId || '').startsWith('grok/')) return 'Grok';
+      if (String(modelId || '').startsWith('qoder/')) return 'Qoder';
+      if (String(modelId || '').startsWith('workbuddy-ai/')) return 'WorkBuddy AI';
+      if (String(modelId || '').startsWith('workbuddy/')) return 'WorkBuddy';
       if (String(modelId || '').startsWith('claude-')) return 'Claude';
       if (String(modelId || '').startsWith('gpt-')) return 'Codex';
       return t('modelColumn');

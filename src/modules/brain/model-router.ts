@@ -1,3 +1,4 @@
+import { agentCliModelPrefix, isAgentCliVendor } from './providers/agent-cli-local-provider.ts';
 import type { BrainConfig, BrainRouteConfig, BrainTaskKind } from './types.ts';
 
 export interface BrainRoute {
@@ -31,6 +32,18 @@ export class BrainModelRouter {
     if (model.startsWith('claude-code/')) {
       return Object.entries(this.config.providers)
         .find(([_providerId, provider]) => provider.type === 'claude-code-local' && provider.disabled !== true)?.[0];
+    }
+
+    // Every agent CLI provider publishes its models under its own vendor prefix,
+    // so one lookup covers all of them and any vendor added later.
+    const agentCliProvider = Object.entries(this.config.providers).find(([_providerId, provider]) => (
+      provider.type === 'agent-cli-local'
+      && provider.disabled !== true
+      && isAgentCliVendor(provider.options?.vendor)
+      && model.startsWith(agentCliModelPrefix(provider.options.vendor))
+    ));
+    if (agentCliProvider) {
+      return agentCliProvider[0];
     }
 
     if (model.startsWith('claude-')) {

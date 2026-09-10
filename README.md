@@ -18,6 +18,7 @@ It runs on `127.0.0.1`, exposes OpenAI-style endpoints, and lets local apps use 
 - Claude Code local provider for personal subscription-backed local testing
 - OpenCode local provider with dynamically discovered free model options
 - Antigravity local provider, including image generation through `/v1/images/generations`
+- Agent CLI local providers for other installed AI IDEs: Grok Bot, Qoder, WorkBuddy, and WorkBuddy AI
 - Configurable provider boundary for future product integration
 
 ## macOS Install
@@ -63,7 +64,14 @@ opencode/gpt-5-nano
 opencode/*-free
 claude-code/sonnet
 claude-code/opus
+grok/grok-4.6
+qoder/<model>
+workbuddy/glm-5.3
+workbuddy-ai/hy3
 ```
+
+Model IDs for the agent CLI providers are discovered from the CLI itself, so
+`/v1/models` only lists what the signed-in account can actually use.
 
 ## HTTP API
 
@@ -115,6 +123,7 @@ Requirements:
 - Codex CLI or Codex App with local ChatGPT login when using the Codex provider
 - Claude Code CLI with local subscription login when using the Claude Code provider
 - OpenCode CLI when using the OpenCode local provider
+- Grok Bot, Qoder, or WorkBuddy installed and signed in when using their agent CLI providers
 
 Run from source:
 

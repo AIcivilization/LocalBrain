@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
+final class LocalBrainStatusApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private enum AppLanguage: String {
         case english = "en"
         case chinese = "zh-Hans"
@@ -45,6 +45,9 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
     private var showKeys = false
     private var lastState: [String: Any] = [:]
     private var refreshFailureCount = 0
+    private var refreshInFlight = false
+    private var menuIsOpen = false
+    private let refreshQueue = DispatchQueue(label: "localbrain.status.refresh", qos: .utility)
     private var timer: Timer?
     private weak var upstreamApiKeyField: NSSecureTextField?
     private weak var upstreamBaseURLField: NSTextField?
@@ -126,29 +129,49 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
     }
 
     private func refreshState() {
-        guard var state = fetchJSON(url: "http://127.0.0.1:8787/brain/local-state") else {
-            refreshFailureCount += 1
-            if !lastState.isEmpty && refreshFailureCount < 3 {
-                var staleState = lastState
-                staleState["stale"] = true
-                lastState = staleState
-                updateStatusTitle()
-                rebuildMenu()
-                return
-            }
-            lastState = ["ok": false, "stale": true]
-            updateStatusTitle()
-            rebuildMenu()
+        guard !refreshInFlight else {
             return
         }
-        refreshFailureCount = 0
-        state["codex"] = codexStatus()
-        state["claudeCode"] = claudeCodeStatus()
-        state["opencode"] = opencodeStatus(state: state)
-        state["antigravity"] = antigravityStatus(state: state)
-        lastState = state
-        updateStatusTitle()
-        rebuildMenu()
+        refreshInFlight = true
+        let previousState = lastState
+
+        refreshQueue.async { [weak self] in
+            guard let self else { return }
+            let fetchedState = self.fetchJSON(url: "http://127.0.0.1:8787/brain/local-state")
+            var nextState = fetchedState
+            if var state = fetchedState {
+                state["codex"] = self.codexStatus()
+                state["claudeCode"] = self.claudeCodeQuickStatus()
+                state["opencode"] = self.opencodeStatus(state: state)
+                state["antigravity"] = self.antigravityQuickStatus(state: state)
+                nextState = state
+            }
+
+            DispatchQueue.main.async {
+                self.refreshInFlight = false
+                guard let state = nextState else {
+                    self.refreshFailureCount += 1
+                    if !previousState.isEmpty && self.refreshFailureCount < 3 {
+                        var staleState = previousState
+                        staleState["stale"] = true
+                        self.lastState = staleState
+                    } else {
+                        self.lastState = ["ok": false, "stale": true]
+                    }
+                    self.updateStatusTitle()
+                    if !self.menuIsOpen {
+                        self.rebuildMenu()
+                    }
+                    return
+                }
+                self.refreshFailureCount = 0
+                self.lastState = state
+                self.updateStatusTitle()
+                if !self.menuIsOpen {
+                    self.rebuildMenu()
+                }
+            }
+        }
     }
 
     private func updateStatusTitle() {
@@ -179,6 +202,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
 
     private func rebuildMenu() {
         menu = NSMenu()
+        menu.delegate = self
         statusItem.menu = menu
 
         let serviceOK = (lastState["ok"] as? Bool) == true
@@ -216,6 +240,15 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
 
         menu.addItem(NSMenuItem.separator())
         menu.addItem(actionItem(text("Quit", "\u{9000}\u{51FA}"), #selector(quit)))
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        menuIsOpen = true
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        menuIsOpen = false
+        refreshState()
     }
 
     private func compactTopStatusTitle() -> String {
@@ -465,6 +498,10 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
             if providerId == "claude-code-local" { return "Claude Code" }
             if providerId == "opencode-local" { return "OpenCode" }
             if providerId == "antigravity-local" { return "Antigravity" }
+            if providerId == "grok-local" { return "Grok" }
+            if providerId == "qoder-local" { return "Qoder" }
+            if providerId == "workbuddy-ai-local" { return "WorkBuddy AI" }
+            if providerId == "workbuddy-local" { return "WorkBuddy" }
             if providerId == "anthropic-api-key" || providerId.localizedCaseInsensitiveContains("anthropic") || providerId.localizedCaseInsensitiveContains("claude") { return "Claude" }
             if providerId.hasPrefix("upstream-") {
                 return text("Upstream", "\u{4E0A}\u{6E38}")
@@ -476,6 +513,10 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         if modelId.hasPrefix("claude-code/") { return "Claude Code" }
         if modelId.hasPrefix("opencode/") { return "OpenCode" }
         if modelId.hasPrefix("antigravity/") { return "Antigravity" }
+        if modelId.hasPrefix("grok/") { return "Grok" }
+        if modelId.hasPrefix("qoder/") { return "Qoder" }
+        if modelId.hasPrefix("workbuddy-ai/") { return "WorkBuddy AI" }
+        if modelId.hasPrefix("workbuddy/") { return "WorkBuddy" }
         if modelId.hasPrefix("claude-") { return "Claude" }
         if modelId.hasPrefix("gpt-") { return "Codex" }
         return text("Model", "\u{6A21}\u{578B}")
@@ -577,6 +618,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
             menu.addItem(actionItem(text("Check / Configure Codex", "\u{68C0}\u{67E5} / \u{914D}\u{7F6E} Codex"), #selector(configureCodex)))
             menu.addItem(NSMenuItem.separator())
         case "claude-code-local":
+            menu.addItem(claudeCodeStatusItem())
             menu.addItem(actionItem(text("Check / Configure Claude Code", "\u{68C0}\u{67E5} / \u{914D}\u{7F6E} Claude Code"), #selector(configureClaudeCode)))
             menu.addItem(NSMenuItem.separator())
         case "opencode-local":
@@ -591,6 +633,23 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         }
         addProviderFilterItems(to: menu, providerId: providerId)
         return menu
+    }
+
+    private func claudeCodeStatusItem() -> NSMenuItem {
+        let claude = lastState["claudeCode"] as? [String: Any] ?? [:]
+        // `hasCli` is only present once the background refresh has evaluated Claude.
+        guard let hasCli = claude["hasCli"] as? Bool else {
+            return findClaudeCode() != nil
+                ? coloredItem(title: text("Status: checking sign-in…", "状态：正在检测登录…"), ok: false, warning: true)
+                : coloredItem(title: text("Status: Claude Code CLI not found", "状态：未找到 Claude Code CLI"), ok: false)
+        }
+        if !hasCli {
+            return coloredItem(title: text("Status: Claude Code CLI not found", "状态：未找到 Claude Code CLI"), ok: false)
+        }
+        if (claude["loggedIn"] as? Bool) == true {
+            return coloredItem(title: text("Status: signed in", "状态：已登录"), ok: true)
+        }
+        return coloredItem(title: text("Status: signed out — sign in via \u{201C}Configure\u{201D} below", "状态：未登录 —— 请用下方\u{201C}检查 / 配置\u{201D}登录"), ok: false, warning: true)
     }
 
     private func providerSourceTitle(displayName: String, providerId: String) -> String {
@@ -611,6 +670,14 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
             return "OpenCode"
         case "antigravity-local":
             return "Antigravity"
+        case "grok-local":
+            return "Grok"
+        case "qoder-local":
+            return "Qoder"
+        case "workbuddy-local":
+            return "WorkBuddy"
+        case "workbuddy-ai-local":
+            return "WorkBuddy AI"
         default:
             return fallback ?? providerId
         }
@@ -883,7 +950,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         }
 
         let codexPath = findCodex() ?? "codex"
-        let command = "cd \(shellQuote(projectRoot.path)); \(shellQuote(codexPath))"
+        let command = "\(proxyExportCommand())cd \(shellQuote(projectRoot.path)); \(shellQuote(codexPath))"
         runAppleScript("tell application \"Terminal\" to do script \(appleScriptString(command))")
         showAlert(title: text("Complete Codex login", "\u{8BF7}\u{5B8C}\u{6210} Codex \u{767B}\u{5F55}"), message: text("Terminal has been opened. In Codex, choose Sign in with ChatGPT, then return to LocalBrain and refresh status.", "\u{5DF2}\u{6253}\u{5F00}\u{7EC8}\u{7AEF}\u{3002}\u{8BF7}\u{5728} Codex \u{4E2D}\u{9009}\u{62E9} Sign in with ChatGPT\u{FF0C}\u{5B8C}\u{6210}\u{540E}\u{56DE}\u{5230} LocalBrain \u{5237}\u{65B0}\u{72B6}\u{6001}\u{3002}"))
     }
@@ -915,7 +982,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
 
         let claudePath = findClaudeCode() ?? "\(NSHomeDirectory())/.local/bin/claude"
         let command = FileManager.default.isExecutableFile(atPath: claudePath)
-            ? "\(shellQuote(claudePath)) auth login"
+            ? "\(proxyExportCommand())\(shellQuote(claudePath)) auth login"
             : "echo 'Claude Code CLI was not found. Install Claude Code first, then return to LocalBrain.'"
         runAppleScript("tell application \"Terminal\" to do script \(appleScriptString(command))")
         showAlert(title: text("Complete Claude Code login", "\u{8BF7}\u{5B8C}\u{6210} Claude Code \u{767B}\u{5F55}"), message: text("Terminal has been opened. Complete Claude Code login, then return to LocalBrain and refresh status.", "\u{5DF2}\u{6253}\u{5F00}\u{7EC8}\u{7AEF}\u{3002}\u{8BF7}\u{5B8C}\u{6210} Claude Code \u{767B}\u{5F55}\u{FF0C}\u{7136}\u{540E}\u{56DE}\u{5230} LocalBrain \u{5237}\u{65B0}\u{72B6}\u{6001}\u{3002}"))
@@ -930,10 +997,19 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
             return
         }
 
-        if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Antigravity") ?? NSWorkspace.shared.urlForApplication(toOpen: URL(fileURLWithPath: "/Applications/Antigravity.app")) {
+        if antigravityProcessIsRunning() && !antigravityProcessUsesProxy() {
+            showAlert(title: text("Restart Antigravity with proxy", "请用代理重启 Antigravity"), message: text("Antigravity is already running without the LocalBrain proxy. Quit Antigravity, then use this menu again so LocalBrain can start it with the proxy.", "Antigravity 当前已运行，但没有带 LocalBrain 代理。请先退出 Antigravity，再点这个菜单，LocalBrain 会用小火箭代理启动它。"))
+            return
+        }
+
+        let executable = "/Applications/Antigravity.app/Contents/MacOS/Antigravity"
+        if FileManager.default.isExecutableFile(atPath: executable) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: executable)
+            process.environment = antigravityLaunchEnvironment()
+            try? process.run()
+        } else if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Antigravity") ?? NSWorkspace.shared.urlForApplication(toOpen: URL(fileURLWithPath: "/Applications/Antigravity.app")) {
             NSWorkspace.shared.open(appURL)
-        } else {
-            NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/Antigravity.app"))
         }
         showAlert(title: text("Complete Antigravity setup", "\u{8BF7}\u{5B8C}\u{6210} Antigravity \u{914D}\u{7F6E}"), message: text("Antigravity has been opened. Sign in there, then return to LocalBrain and refresh status.", "\u{5DF2}\u{6253}\u{5F00} Antigravity\u{3002}\u{8BF7}\u{5728}\u{5176}\u{4E2D}\u{5B8C}\u{6210}\u{767B}\u{5F55}\u{FF0C}\u{7136}\u{540E}\u{56DE}\u{5230} LocalBrain \u{5237}\u{65B0}\u{72B6}\u{6001}\u{3002}"))
     }
@@ -1288,6 +1364,28 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         ]
     }
 
+    private func claudeCodeQuickStatus() -> [String: Any] {
+        guard let claudePath = findClaudeCode() else {
+            return ["ok": false, "hasCli": false, "loggedIn": false, "reason": "missing-cli"]
+        }
+        // `auth status` reads local credentials only (no network), so it is cheap
+        // enough to run on every background refresh and is the only reliable way
+        // to notice an expired/absent login before a request actually fails.
+        guard let authText = commandOutput(executable: claudePath, arguments: ["auth", "status", "--json"], timeout: 4.0),
+              let data = authText.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return ["ok": false, "hasCli": true, "loggedIn": false, "reason": "auth-status-failed"]
+        }
+        let loggedIn = (json["loggedIn"] as? Bool) == true
+        return [
+            "ok": loggedIn,
+            "hasCli": true,
+            "loggedIn": loggedIn,
+            "authMethod": json["authMethod"] as? String ?? "",
+            "reason": loggedIn ? "quick-check" : "logged-out"
+        ]
+    }
+
     private func opencodeStatus(state: [String: Any]) -> [String: Any] {
         let models = state["availableModels"] as? [String] ?? []
         let hasFreeModels = models.contains { $0.hasPrefix("opencode/") }
@@ -1302,10 +1400,24 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         let modelDetails = state["availableModelDetails"] as? [[String: Any]] ?? []
         let modelCount = modelDetails.filter { ($0["providerId"] as? String) == "antigravity-local" }.count
         let appExists = FileManager.default.fileExists(atPath: "/Applications/Antigravity.app")
+        let proxyOK = !antigravityProcessIsRunning() || antigravityProcessUsesProxy()
+        return [
+            "ok": appExists && modelCount > 0 && proxyOK,
+            "hasApp": appExists,
+            "modelCount": modelCount,
+            "proxyOK": proxyOK
+        ]
+    }
+
+    private func antigravityQuickStatus(state: [String: Any]) -> [String: Any] {
+        let modelDetails = state["availableModelDetails"] as? [[String: Any]] ?? []
+        let modelCount = modelDetails.filter { ($0["providerId"] as? String) == "antigravity-local" }.count
+        let appExists = FileManager.default.fileExists(atPath: "/Applications/Antigravity.app")
         return [
             "ok": appExists && modelCount > 0,
             "hasApp": appExists,
-            "modelCount": modelCount
+            "modelCount": modelCount,
+            "reason": "quick-check"
         ]
     }
 
@@ -1351,6 +1463,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
+        process.environment = processEnvironment()
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = Pipe()
@@ -1638,7 +1751,189 @@ private func processEnvironment() -> [String: String] {
     ]
     let existing = env["PATH"] ?? ""
     env["PATH"] = (pathParts + [existing]).filter { !$0.isEmpty }.joined(separator: ":")
+    if let proxyURL = detectedProxyURL() {
+        env["HTTPS_PROXY"] = proxyURL
+        env["HTTP_PROXY"] = proxyURL
+        env["ALL_PROXY"] = proxyURL
+        env["https_proxy"] = proxyURL
+        env["http_proxy"] = proxyURL
+        env["all_proxy"] = proxyURL
+        let existingNoProxy = env["NO_PROXY"] ?? env["no_proxy"] ?? ""
+        let noProxyValues = Set((existingNoProxy.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) } + ["127.0.0.1", "localhost", "::1"]).filter { !$0.isEmpty })
+        env["NO_PROXY"] = noProxyValues.sorted().joined(separator: ",")
+        env["no_proxy"] = env["NO_PROXY"]
+    }
     return env
+}
+
+private func antigravityLaunchEnvironment() -> [String: String] {
+    let base = processEnvironment()
+    let home = NSHomeDirectory()
+    let user = NSUserName()
+    var env: [String: String] = [
+        "HOME": home,
+        "USER": user,
+        "LOGNAME": user,
+        "SHELL": base["SHELL"] ?? "/bin/zsh",
+        "TMPDIR": NSTemporaryDirectory(),
+        "PATH": base["PATH"] ?? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    ]
+
+    for key in ["LANG", "LC_ALL", "LC_CTYPE"] {
+        if let value = base[key], !value.isEmpty {
+            env[key] = value
+        }
+    }
+    for key in ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy", "NO_PROXY", "no_proxy"] {
+        if let value = base[key], !value.isEmpty {
+            env[key] = value
+        }
+    }
+    return env
+}
+
+private func proxyExportCommand() -> String {
+    guard let proxyURL = detectedProxyURL() else { return "" }
+    let noProxy = "127.0.0.1,localhost,::1"
+    return [
+        "export HTTPS_PROXY=\(shellQuote(proxyURL))",
+        "export HTTP_PROXY=\(shellQuote(proxyURL))",
+        "export ALL_PROXY=\(shellQuote(proxyURL))",
+        "export https_proxy=\(shellQuote(proxyURL))",
+        "export http_proxy=\(shellQuote(proxyURL))",
+        "export all_proxy=\(shellQuote(proxyURL))",
+        "export NO_PROXY=\(shellQuote(noProxy))",
+        "export no_proxy=\(shellQuote(noProxy))"
+    ].joined(separator: "; ") + "; "
+}
+
+private func detectedProxyURL() -> String? {
+    let env = ProcessInfo.processInfo.environment
+    for key in ["LOCALBRAIN_PROXY_URL", "BRAIN_PROXY_URL", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"] {
+        if let value = env[key]?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty {
+            return normalizeProxyURL(value)
+        }
+    }
+    return macOSSystemProxyURL()
+}
+
+private func normalizeProxyURL(_ value: String) -> String {
+    if value.lowercased().hasPrefix("http://") || value.lowercased().hasPrefix("https://") {
+        return value
+    }
+    return "http://\(value)"
+}
+
+private func macOSSystemProxyURL() -> String? {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/sbin/scutil")
+    process.arguments = ["--proxy"]
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = Pipe()
+    do {
+        try process.run()
+        process.waitUntilExit()
+    } catch {
+        return nil
+    }
+    guard process.terminationStatus == 0,
+          let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) else {
+        return nil
+    }
+    let values = parseProxyDictionary(output)
+    if values["HTTPSEnable"] == "1", let host = values["HTTPSProxy"], let port = values["HTTPSPort"], !host.isEmpty, port != "0" {
+        return "http://\(host):\(port)"
+    }
+    if values["HTTPEnable"] == "1", let host = values["HTTPProxy"], let port = values["HTTPPort"], !host.isEmpty, port != "0" {
+        return "http://\(host):\(port)"
+    }
+    return nil
+}
+
+private func parseProxyDictionary(_ output: String) -> [String: String] {
+    var values: [String: String] = [:]
+    for line in output.components(separatedBy: .newlines) {
+        let parts = line.split(separator: ":", maxSplits: 1).map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+        if parts.count == 2 {
+            values[parts[0]] = parts[1]
+        }
+    }
+    return values
+}
+
+private func antigravityProcessIsRunning() -> Bool {
+    return antigravityLanguageServerLine() != nil
+}
+
+private func antigravityProcessUsesProxy() -> Bool {
+    guard let proxyURL = detectedProxyURL(),
+          let line = antigravityLanguageServerLine() else {
+        return false
+    }
+    let accepted = Set([proxyURL, proxyURL.replacingOccurrences(of: "http://", with: "")])
+    for key in ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"] {
+        if let value = processEnvValue(line: line, key: key), accepted.contains(value) {
+            return true
+        }
+    }
+    return false
+}
+
+private func antigravityLanguageServerLine() -> String? {
+    guard let pids = shortProcessOutput(
+        executable: "/usr/bin/pgrep",
+        arguments: ["-f", "/Applications/Antigravity.app/Contents/Resources/bin/language_server"],
+        timeout: 1.0
+    ) else {
+        return nil
+    }
+
+    for pid in pids.split(whereSeparator: \.isNewline).map(String.init) {
+        guard pid.allSatisfy(\.isNumber),
+              let output = shortProcessOutput(executable: "/bin/ps", arguments: ["eww", "-p", pid], timeout: 1.0) else {
+            continue
+        }
+        if let line = output.components(separatedBy: .newlines).first(where: {
+            $0.contains("/Applications/Antigravity.app/Contents/Resources/bin/language_server") && $0.contains("--csrf_token")
+        }) {
+            return line
+        }
+    }
+    return nil
+}
+
+private func processEnvValue(line: String, key: String) -> String? {
+    let prefix = "\(key)="
+    for part in line.split(separator: " ") {
+        if part.hasPrefix(prefix) {
+            return String(part.dropFirst(prefix.count))
+        }
+    }
+    return nil
+}
+
+private func shortProcessOutput(executable: String, arguments: [String], timeout: TimeInterval) -> String? {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: executable)
+    process.arguments = arguments
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = Pipe()
+    do {
+        try process.run()
+    } catch {
+        return nil
+    }
+    let deadline = Date().addingTimeInterval(timeout)
+    while process.isRunning && Date() < deadline {
+        Thread.sleep(forTimeInterval: 0.02)
+    }
+    if process.isRunning {
+        process.terminate()
+        return nil
+    }
+    return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)
 }
 
 private func debugLog(_ text: String) {

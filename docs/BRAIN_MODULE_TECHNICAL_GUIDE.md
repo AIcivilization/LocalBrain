@@ -194,6 +194,7 @@ Built-in providers:
 - `openai-api-key`: OpenAI-compatible upstream using `OPENAI_API_KEY`, with model discovery through `/models`
 - `codex-chatgpt-local`: reads local Codex auth and calls the ChatGPT Codex backend
 - `opencode-local`: uses the local OpenCode CLI and discovers free OpenCode models dynamically
+- `agent-cli-local`: drives the agent CLI shipped by another installed AI IDE (Grok Bot, Qoder, WorkBuddy, WorkBuddy AI)
 - `custom-http`: forwards standard Brain requests to an external AI gateway
 - `chatgpt-subscription-experimental`: local testing adapter boundary, disabled by default
 
@@ -294,6 +295,77 @@ The default provider configuration is:
   }
 }
 ```
+
+## Agent CLI Local Providers
+
+Several locally installed AI IDEs ship an agent CLI that copies the Claude Code
+headless contract: `-p` for a single turn, `--output-format json`, a `--model`
+flag, and a permission mode that never prompts. `agent-cli-local` covers all of
+them with one implementation; a vendor profile in
+`src/modules/brain/providers/agent-cli-local-provider.ts` supplies the parts that
+differ.
+
+| Vendor | CLI | Model prefix | Model discovery |
+| --- | --- | --- | --- |
+| `grok` | `grok` (Grok Bot) | `grok/` | `grok models` |
+| `qoder` | `qodercli` (Qoder) | `qoder/` | `qodercli --list-models` |
+| `workbuddy` | `codebuddy` inside `WorkBuddy.app` | `workbuddy/` | rejected-model probe |
+| `workbuddy-ai` | `codebuddy` inside `WorkBuddy AI.app` | `workbuddy-ai/` | rejected-model probe |
+
+The provider signs in through the vendor's own CLI, so LocalBrain never reads or
+stores a token. Sign in once with that CLI (`grok login`, `qodercli login`, or
+the WorkBuddy app) and the models appear in `/v1/models`.
+
+WorkBuddy has no list command, so discovery sends a model ID the account cannot
+own; the CLI answers with the catalog it is entitled to. The probe fails before
+any model call, so it costs nothing.
+
+Model IDs carry the vendor prefix, which is how requests route without an
+explicit `providerId`:
+
+```bash
+curl -X POST http://127.0.0.1:8787/v1/chat/completions \
+  -H "authorization: Bearer $OPENAI_API_KEY" \
+  -H "content-type: application/json" \
+  -d '{"model": "workbuddy/glm-5.3", "messages": [{"role": "user", "content": "Reply with OK only."}]}'
+```
+
+The default provider configuration is:
+
+```json
+"workbuddy-local": {
+  "type": "agent-cli-local",
+  "displayName": "WorkBuddy Local Provider",
+  "localOnly": false,
+  "experimental": true,
+  "options": {
+    "vendor": "workbuddy",
+    "timeoutMs": 900000,
+    "modelCacheTtlMs": 60000,
+    "forceProxy": false
+  }
+}
+```
+
+`options.vendor` is required and validated. `options.cliPath` overrides CLI
+discovery; otherwise the provider checks the vendor's known install locations,
+newest versioned copy first, and falls back to `PATH`.
+
+Set `forceProxy` per vendor rather than globally: it decides whether the CLI's
+traffic is pushed through the configured proxy, and a provider with
+`forceProxy: true` refuses to run when no proxy is available. Grok defaults to
+`true`; the others reach their endpoints directly.
+
+These CLIs refresh their access token lazily, so the first call after an idle
+period fails with `401` and the immediate retry succeeds. The provider retries
+once for that reason; a CLI that is genuinely signed out fails twice and reports
+the CLI's own message, such as `Not logged in - Please run /login`.
+
+### Adding another vendor
+
+Add an entry to `PROFILES` and to `AGENT_CLI_VENDORS`, then add the provider to
+the example configs. No other file needs to change except the display-name maps
+in `src/modules/brain/server.ts` and `app/LocalBrainStatusApp.swift`.
 
 ## macOS Menu-Bar App
 

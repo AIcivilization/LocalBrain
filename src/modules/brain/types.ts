@@ -20,6 +20,7 @@ export type BrainProviderKind =
   | 'antigravity-local'
   | 'deepseek-web-local'
   | 'codex-chatgpt-local'
+  | 'agent-cli-local'
   | 'chatgpt-subscription-experimental';
 
 export type BrainFinishReason = 'stop' | 'length' | 'tool-calls' | 'error';

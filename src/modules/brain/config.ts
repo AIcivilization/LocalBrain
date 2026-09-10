@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 
 import { BrainRuntime } from './brain-runtime.ts';
 import { BrainProviderRegistry } from './provider-registry.ts';
+import { AgentCliLocalProvider, AGENT_CLI_VENDORS, isAgentCliVendor } from './providers/agent-cli-local-provider.ts';
 import { AntigravityLocalBrainProvider } from './providers/antigravity-local-provider.ts';
 import { AnthropicBrainProvider } from './providers/anthropic-provider.ts';
 import { ClaudeCodeLocalProvider } from './providers/claude-code-local-provider.ts';
@@ -29,6 +30,7 @@ const PROVIDER_KINDS: BrainProviderKind[] = [
   'antigravity-local',
   'deepseek-web-local',
   'codex-chatgpt-local',
+  'agent-cli-local',
   'chatgpt-subscription-experimental',
 ];
 
@@ -64,6 +66,10 @@ export function validateBrainConfig(config: BrainConfig): BrainConfigValidationR
 
     if (providerConfig.type === 'codex-chatgpt-local' && providerConfig.localOnly === true) {
       warnings.push(`provider ${providerId} reads local Codex auth but calls chatgpt.com; localOnly should usually be false`);
+    }
+
+    if (providerConfig.type === 'agent-cli-local' && !isAgentCliVendor(providerConfig.options?.vendor)) {
+      errors.push(`agent-cli-local provider ${providerId} requires options.vendor to be one of: ${AGENT_CLI_VENDORS.join(', ')}`);
     }
 
     if (providerConfig.type === 'openai-api-key' || providerConfig.type === 'anthropic-api-key' || providerConfig.type === 'vercel-ai-sdk') {
@@ -201,6 +207,28 @@ export function registerConfiguredProvider(
       clientId: typeof providerConfig.options?.clientId === 'string' ? providerConfig.options.clientId : undefined,
       userAgent: typeof providerConfig.options?.userAgent === 'string' ? providerConfig.options.userAgent : undefined,
       modelCacheTtlMs: typeof providerConfig.options?.modelCacheTtlMs === 'number' ? providerConfig.options.modelCacheTtlMs : undefined,
+      proxyUrl: typeof providerConfig.options?.proxyUrl === 'string' ? providerConfig.options.proxyUrl : undefined,
+      forceProxy: typeof providerConfig.options?.forceProxy === 'boolean' ? providerConfig.options.forceProxy : undefined,
+    }));
+    return;
+  }
+
+  if (providerConfig.type === 'agent-cli-local') {
+    const vendor = providerConfig.options?.vendor;
+    if (!isAgentCliVendor(vendor)) {
+      throw new Error(`agent-cli-local provider ${providerId} requires options.vendor to be one of: ${AGENT_CLI_VENDORS.join(', ')}`);
+    }
+    registry.register(new AgentCliLocalProvider({
+      id: providerId,
+      vendor,
+      displayName: providerConfig.displayName,
+      cliPath: typeof providerConfig.options?.cliPath === 'string' ? providerConfig.options.cliPath : undefined,
+      workDir: typeof providerConfig.options?.workDir === 'string' ? providerConfig.options.workDir : undefined,
+      timeoutMs: typeof providerConfig.options?.timeoutMs === 'number' ? providerConfig.options.timeoutMs : undefined,
+      modelCacheTtlMs: typeof providerConfig.options?.modelCacheTtlMs === 'number' ? providerConfig.options.modelCacheTtlMs : undefined,
+      proxyUrl: typeof providerConfig.options?.proxyUrl === 'string' ? providerConfig.options.proxyUrl : undefined,
+      forceProxy: typeof providerConfig.options?.forceProxy === 'boolean' ? providerConfig.options.forceProxy : undefined,
+      experimental: providerConfig.experimental,
     }));
     return;
   }
@@ -214,6 +242,8 @@ export function registerConfiguredProvider(
       timeoutMs: typeof providerConfig.options?.timeoutMs === 'number' ? providerConfig.options.timeoutMs : undefined,
       modelCacheTtlMs: typeof providerConfig.options?.modelCacheTtlMs === 'number' ? providerConfig.options.modelCacheTtlMs : undefined,
       settingSources: typeof providerConfig.options?.settingSources === 'string' ? providerConfig.options.settingSources : undefined,
+      proxyUrl: typeof providerConfig.options?.proxyUrl === 'string' ? providerConfig.options.proxyUrl : undefined,
+      forceProxy: typeof providerConfig.options?.forceProxy === 'boolean' ? providerConfig.options.forceProxy : undefined,
       experimental: providerConfig.experimental,
     }));
     return;
@@ -227,6 +257,8 @@ export function registerConfiguredProvider(
       cliPath: typeof providerConfig.options?.cliPath === 'string' ? providerConfig.options.cliPath : undefined,
       modelProvider: typeof providerConfig.options?.modelProvider === 'string' ? providerConfig.options.modelProvider : undefined,
       passwordEnv: typeof providerConfig.options?.passwordEnv === 'string' ? providerConfig.options.passwordEnv : undefined,
+      proxyUrl: typeof providerConfig.options?.proxyUrl === 'string' ? providerConfig.options.proxyUrl : undefined,
+      forceProxy: typeof providerConfig.options?.forceProxy === 'boolean' ? providerConfig.options.forceProxy : undefined,
       experimental: providerConfig.experimental,
     }));
     return;
@@ -243,6 +275,8 @@ export function registerConfiguredProvider(
       imageOutputDir: typeof providerConfig.options?.imageOutputDir === 'string' ? providerConfig.options.imageOutputDir : undefined,
       workspaceUri: typeof providerConfig.options?.workspaceUri === 'string' ? providerConfig.options.workspaceUri : undefined,
       modelCacheTtlMs: typeof providerConfig.options?.modelCacheTtlMs === 'number' ? providerConfig.options.modelCacheTtlMs : undefined,
+      proxyUrl: typeof providerConfig.options?.proxyUrl === 'string' ? providerConfig.options.proxyUrl : undefined,
+      forceProxy: typeof providerConfig.options?.forceProxy === 'boolean' ? providerConfig.options.forceProxy : undefined,
       experimental: providerConfig.experimental,
     }));
     return;

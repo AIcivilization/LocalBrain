@@ -13,6 +13,7 @@ import type {
   BrainProviderRequest,
   BrainProviderResponse,
 } from '../types.ts';
+import { proxyEnvironment } from './proxy.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -23,6 +24,8 @@ export interface OpenCodeLocalBrainProviderOptions {
   cliPath?: string;
   modelProvider?: string;
   passwordEnv?: string;
+  proxyUrl?: string;
+  forceProxy?: boolean;
   experimental?: boolean;
 }
 
@@ -47,6 +50,8 @@ export class OpenCodeLocalBrainProvider implements BrainProvider {
   private readonly configuredCliPath?: string;
   private readonly modelProvider: string;
   private readonly passwordEnv?: string;
+  private readonly proxyUrl?: string;
+  private readonly forceProxy: boolean;
   private readonly experimental: boolean;
   private modelCache?: {
     expiresAt: number;
@@ -60,6 +65,8 @@ export class OpenCodeLocalBrainProvider implements BrainProvider {
     this.configuredCliPath = options.cliPath;
     this.modelProvider = options.modelProvider ?? 'opencode';
     this.passwordEnv = options.passwordEnv;
+    this.proxyUrl = options.proxyUrl;
+    this.forceProxy = options.forceProxy ?? true;
     this.experimental = options.experimental ?? true;
   }
 
@@ -83,6 +90,7 @@ export class OpenCodeLocalBrainProvider implements BrainProvider {
 
     const cliPath = await resolveOpenCodeCliPath(this.configuredCliPath);
     const { stdout } = await execFileAsync(cliPath, ['models', this.modelProvider], {
+      env: this.opencodeEnvironment(cliPath),
       timeout: 10_000,
       maxBuffer: 1024 * 1024,
     });
@@ -143,7 +151,7 @@ export class OpenCodeLocalBrainProvider implements BrainProvider {
       buildPrompt(request.messages),
     ], timeout, {
       cwd: opencodeWorkingDirectory(),
-      env: opencodeEnvironment(cliPath),
+      env: this.opencodeEnvironment(cliPath),
     });
 
     const content = extractCliContent(stdout);
@@ -196,6 +204,11 @@ export class OpenCodeLocalBrainProvider implements BrainProvider {
       throw new Error(`OpenCode local provider failed: ${response.status} ${text}`);
     }
     return await response.json() as T;
+  }
+
+  private opencodeEnvironment(cliPath: string): NodeJS.ProcessEnv {
+    const baseEnv = opencodeEnvironment(cliPath);
+    return this.forceProxy ? proxyEnvironment(baseEnv, this.proxyUrl) : baseEnv;
   }
 }
 

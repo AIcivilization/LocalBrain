@@ -18,12 +18,13 @@ import type {
   BrainProviderRequest,
   BrainProviderResponse,
 } from '../types.ts';
+import { requireForcedProxyUrl } from './proxy.ts';
 
 const execFileAsync = promisify(execFile);
 
 const DEFAULT_STATE_DB_PATHS = [
-  path.join(os.homedir(), 'Library', 'Application Support', 'Antigravity IDE', 'User', 'globalStorage', 'state.vscdb'),
   path.join(os.homedir(), 'Library', 'Application Support', 'Antigravity', 'User', 'globalStorage', 'state.vscdb'),
+  path.join(os.homedir(), 'Library', 'Application Support', 'Antigravity IDE', 'User', 'globalStorage', 'state.vscdb'),
 ];
 
 const KNOWN_ANTIGRAVITY_MODELS: Array<{ displayName: string; id: string; enumNumber: number; free?: boolean }> = [
@@ -84,6 +85,8 @@ export interface AntigravityLocalProviderOptions {
   imageOutputDir?: string;
   workspaceUri?: string;
   modelCacheTtlMs?: number;
+  proxyUrl?: string;
+  forceProxy?: boolean;
   experimental?: boolean;
 }
 
@@ -106,6 +109,8 @@ export class AntigravityLocalBrainProvider implements BrainProvider {
   private readonly imageOutputDir: string;
   private readonly workspaceUri?: string;
   private readonly modelCacheTtlMs: number;
+  private readonly proxyUrl?: string;
+  private readonly forceProxy: boolean;
   private readonly experimental: boolean;
   private modelCache?: {
     expiresAt: number;
@@ -122,6 +127,8 @@ export class AntigravityLocalBrainProvider implements BrainProvider {
     this.imageOutputDir = options.imageOutputDir ?? path.join(process.cwd(), 'logs', 'antigravity-images');
     this.workspaceUri = options.workspaceUri;
     this.modelCacheTtlMs = options.modelCacheTtlMs ?? 60_000;
+    this.proxyUrl = options.proxyUrl;
+    this.forceProxy = options.forceProxy ?? true;
     this.experimental = options.experimental ?? true;
   }
 
@@ -138,6 +145,8 @@ export class AntigravityLocalBrainProvider implements BrainProvider {
   }
 
   async generateImage(request: BrainImageGenerationRequest): Promise<BrainImageGenerationResponse> {
+    await this.ensureLanguageServerUsesProxy();
+    await this.ensureUsableAuthState();
     const model = await this.resolveModel(request.model);
     const endpoint = await this.resolveGrpcEndpoint();
     const imagePaths = await requestAntigravityImageGeneration({
@@ -187,6 +196,8 @@ export class AntigravityLocalBrainProvider implements BrainProvider {
   }
 
   async generate(request: BrainProviderRequest): Promise<BrainProviderResponse> {
+    await this.ensureLanguageServerUsesProxy();
+    await this.ensureUsableAuthState();
     const model = await this.resolveModel(request.model);
     const endpoint = await this.resolveGrpcEndpoint();
     const content = await requestAntigravityModelResponse({
@@ -251,18 +262,74 @@ export class AntigravityLocalBrainProvider implements BrainProvider {
   }
 
   private async readJsonValue<T>(key: string): Promise<T> {
+    const text = (await this.readStateValue(this.stateDbPath, key))?.trim();
+    if (!text) {
+      throw new Error(`Antigravity state key not found: ${key}`);
+    }
+    return JSON.parse(text) as T;
+  }
+
+  private async ensureUsableAuthState(): Promise<void> {
+    const statePaths = [...new Set([this.stateDbPath, ...DEFAULT_STATE_DB_PATHS])];
+    const states: AntigravityUnifiedAuthState[] = [];
+    for (const statePath of statePaths) {
+      const value = await this.readStateValue(statePath, 'antigravityUnifiedStateSync.oauthToken');
+      const state = value ? parseAntigravityUnifiedAuthState(value) : undefined;
+      if (state) {
+        states.push(state);
+      }
+    }
+
+    const signedIn = states.some((state) => ['signedIn', 'loggedIn', 'ready'].includes(state.state ?? ''));
+    if (signedIn) {
+      return;
+    }
+
+    const loginError = states.find((state) => state.state === 'loginError');
+    if (loginError) {
+      const context = loginError.context ?? {};
+      const message = context.ineligibleMessage || context.errorMessage || 'Antigravity login is not usable.';
+      throw new Error(`Antigravity login error: ${message}`);
+    }
+
+    const signedOut = states.find((state) => state.state === 'signedOut');
+    if (signedOut) {
+      throw new Error('Antigravity is signed out. Open Antigravity, sign in, then refresh LocalBrain status.');
+    }
+  }
+
+  private async ensureLanguageServerUsesProxy(): Promise<void> {
+    if (!this.forceProxy) {
+      return;
+    }
+    const proxyUrl = requireForcedProxyUrl('Antigravity', this.proxyUrl);
+    const endpoint = await this.resolveGrpcEndpoint();
+    if (!endpoint.pid) {
+      throw new Error('Antigravity proxy cannot be verified because the language server process was not found.');
+    }
+    const { stdout } = await execFileAsync('ps', ['eww', '-p', String(endpoint.pid)], {
+      timeout: 10_000,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    if (processLineHasProxy(stdout, proxyUrl)) {
+      return;
+    }
+    throw new Error(`Antigravity must be restarted with proxy ${proxyUrl}. Quit Antigravity, then open it from LocalBrain so it inherits the proxy.`);
+  }
+
+  private async readStateValue(stateDbPath: string, key: string): Promise<string | undefined> {
+    if (!existsSync(stateDbPath)) {
+      return undefined;
+    }
     const { stdout } = await execFileAsync(this.sqlitePath, [
-      this.stateDbPath,
+      stateDbPath,
       `select value from ItemTable where key = '${key.replaceAll("'", "''")}';`,
     ], {
       timeout: 10_000,
       maxBuffer: 16 * 1024 * 1024,
     });
     const text = stdout.trim();
-    if (!text) {
-      throw new Error(`Antigravity state key not found: ${key}`);
-    }
-    return JSON.parse(text) as T;
+    return text.length > 0 ? text : undefined;
   }
 
   private async resolveGrpcEndpoint(): Promise<AntigravityGrpcEndpoint> {
@@ -287,14 +354,16 @@ export class AntigravityLocalBrainProvider implements BrainProvider {
       const extensionServerPort = matchProcessArg(line, '--extension_server_port');
       const csrfToken = matchProcessArg(line, '--csrf_token');
       const configuredPort = Number(httpsServerPort);
+      const pid = matchProcessPid(line);
       const port = Number.isInteger(configuredPort) && configuredPort > 0
         ? configuredPort
-        : Number(await resolveLanguageServerHttpsPort(matchProcessPid(line), extensionServerPort));
+        : Number(await resolveLanguageServerHttpsPort(pid, extensionServerPort));
       if (Number.isInteger(port) && port > 0 && csrfToken) {
         return {
           port,
           csrfToken,
           secure: true,
+          pid,
         };
       }
     }
@@ -307,6 +376,86 @@ interface AntigravityGrpcEndpoint {
   port: number;
   csrfToken: string;
   secure: boolean;
+  pid?: number;
+}
+
+interface AntigravityUnifiedAuthState {
+  state?: string;
+  context?: {
+    errorMessage?: string;
+    ineligibleMessage?: string;
+  };
+}
+
+function parseAntigravityUnifiedAuthState(value: string): AntigravityUnifiedAuthState | undefined {
+  const decoded = Buffer.from(value, 'base64').toString('utf8');
+  const marker = '{"state":';
+  const start = decoded.indexOf(marker);
+  if (start < 0) {
+    return undefined;
+  }
+  const json = extractBalancedJson(decoded.slice(start));
+  if (!json) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(json) as AntigravityUnifiedAuthState;
+  } catch {
+    return undefined;
+  }
+}
+
+function extractBalancedJson(input: string): string | undefined {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < input.length; index += 1) {
+    const char = input[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) {
+      continue;
+    }
+    if (char === '{') {
+      depth += 1;
+    }
+    if (char === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        return input.slice(0, index + 1);
+      }
+    }
+  }
+  return undefined;
+}
+
+function processLineHasProxy(line: string, proxyUrl: string): boolean {
+  const acceptable = new Set([
+    proxyUrl,
+    proxyUrl.replace(/^http:\/\//, ''),
+  ]);
+  for (const key of ['HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY', 'https_proxy', 'http_proxy', 'all_proxy']) {
+    const value = matchProcessEnv(line, key);
+    if (value && acceptable.has(value)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function matchProcessEnv(line: string, key: string): string | undefined {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return line.match(new RegExp(`(?:^|\\s)${escaped}=([^\\s]+)`))?.[1];
 }
 
 async function requestAntigravityModelResponse(options: {
@@ -482,9 +631,6 @@ function discoverAntigravityModels(userStatus: Buffer): Array<{ displayName: str
   const discovered = new Map<string, { displayName: string; id: string; enumNumber: number; free?: boolean }>();
 
   for (const known of KNOWN_ANTIGRAVITY_MODELS) {
-    if (!bufferIncludesUtf8(userStatus, known.displayName)) {
-      continue;
-    }
     discovered.set(known.id, known);
   }
 
@@ -789,10 +935,6 @@ function looksLikeModelDisplayName(value: string): boolean {
   return /^(Gemini|Claude|GPT|OpenAI|Anthropic)\b/i.test(value)
     && value.length <= 80
     && !value.includes(';');
-}
-
-function bufferIncludesUtf8(buffer: Buffer, value: string): boolean {
-  return buffer.indexOf(Buffer.from(value, 'utf8')) >= 0;
 }
 
 function slugifyModelName(value: string): string {

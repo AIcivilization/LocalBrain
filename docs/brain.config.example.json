@@ -32,7 +32,8 @@
       "options": {
         "timeoutMs": 900000,
         "modelCacheTtlMs": 60000,
-        "settingSources": "project,local"
+        "settingSources": "project,local",
+        "forceProxy": true
       }
     },
     "local-ai-gateway": {
@@ -57,7 +58,60 @@
       "disabled": true,
       "options": {
         "sqlitePath": "sqlite3",
-        "modelCacheTtlMs": 60000
+        "modelCacheTtlMs": 60000,
+        "forceProxy": true
+      }
+    },
+    "grok-local": {
+      "type": "agent-cli-local",
+      "displayName": "Grok Bot Local Provider",
+      "localOnly": false,
+      "experimental": true,
+      "disabled": true,
+      "options": {
+        "vendor": "grok",
+        "timeoutMs": 900000,
+        "modelCacheTtlMs": 60000,
+        "forceProxy": true
+      }
+    },
+    "qoder-local": {
+      "type": "agent-cli-local",
+      "displayName": "Qoder Local Provider",
+      "localOnly": false,
+      "experimental": true,
+      "disabled": true,
+      "options": {
+        "vendor": "qoder",
+        "timeoutMs": 900000,
+        "modelCacheTtlMs": 60000,
+        "forceProxy": false
+      }
+    },
+    "workbuddy-local": {
+      "type": "agent-cli-local",
+      "displayName": "WorkBuddy Local Provider",
+      "localOnly": false,
+      "experimental": true,
+      "disabled": true,
+      "options": {
+        "vendor": "workbuddy",
+        "timeoutMs": 900000,
+        "modelCacheTtlMs": 60000,
+        "forceProxy": false
+      }
+    },
+    "workbuddy-ai-local": {
+      "type": "agent-cli-local",
+      "displayName": "WorkBuddy AI Local Provider",
+      "localOnly": false,
+      "experimental": true,
+      "disabled": true,
+      "options": {
+        "vendor": "workbuddy-ai",
+        "timeoutMs": 900000,
+        "modelCacheTtlMs": 60000,
+        "forceProxy": false
       }
     }
   },
