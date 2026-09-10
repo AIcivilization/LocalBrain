@@ -357,9 +357,11 @@ discovery; otherwise the provider checks the vendor's known install locations,
 newest versioned copy first, and falls back to `PATH`.
 
 Set `forceProxy` per vendor rather than globally: it decides whether the CLI's
-traffic is pushed through the configured proxy, and a provider with
-`forceProxy: true` refuses to run when no proxy is available. Grok defaults to
-`true`; the others reach their endpoints directly.
+traffic is pushed through the configured proxy when one can be found. It is a
+preference, not a requirement - with no proxy discoverable the CLI runs on the
+direct path rather than failing, because connectivity from a TUN-mode client
+exposes no proxy endpoint to discover. Grok defaults to `true`; the others
+reach their endpoints directly.
 
 These CLIs refresh their access token lazily, so calls after an idle period fail
 with `401` until a refresh lands. The provider retries twice for that reason,

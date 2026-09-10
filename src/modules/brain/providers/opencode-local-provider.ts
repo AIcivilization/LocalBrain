@@ -13,7 +13,7 @@ import type {
   BrainProviderRequest,
   BrainProviderResponse,
 } from '../types.ts';
-import { proxyEnvironment } from './proxy.ts';
+import { proxyEnvironmentIfAvailable } from './proxy.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -208,7 +208,7 @@ export class OpenCodeLocalBrainProvider implements BrainProvider {
 
   private opencodeEnvironment(cliPath: string): NodeJS.ProcessEnv {
     const baseEnv = opencodeEnvironment(cliPath);
-    return this.forceProxy ? proxyEnvironment(baseEnv, this.proxyUrl) : baseEnv;
+    return this.forceProxy ? proxyEnvironmentIfAvailable(baseEnv, this.proxyUrl) : baseEnv;
   }
 }
 

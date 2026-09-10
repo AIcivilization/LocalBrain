@@ -15,7 +15,7 @@ import type {
   BrainProviderRequest,
   BrainProviderResponse,
 } from '../types.ts';
-import { fetchViaHttpProxy, proxyEnvironment, requireForcedProxyUrl } from './proxy.ts';
+import { fetchViaHttpProxy, proxyEnvironmentIfAvailable, resolveForcedProxyUrl } from './proxy.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -135,7 +135,7 @@ export class CodexChatGptLocalProvider implements BrainProvider {
     const { stdout } = await execFileAsync(cliPath, ['debug', 'models'], {
       timeout: 10_000,
       maxBuffer: 16 * 1024 * 1024,
-      env: this.forceProxy ? proxyEnvironment(process.env, this.requireProxyUrl()) : process.env,
+      env: this.forceProxy ? proxyEnvironmentIfAvailable(process.env, this.proxyUrl) : process.env,
     });
     const catalog = JSON.parse(stdout) as CodexModelCatalog;
     const models = (catalog.models ?? [])
@@ -285,9 +285,6 @@ export class CodexChatGptLocalProvider implements BrainProvider {
     return nextAuth;
   }
 
-  private requireProxyUrl(): string {
-    return requireForcedProxyUrl('Codex', this.proxyUrl);
-  }
 
   private async providerFetch(url: string, init: {
     method?: string;
@@ -295,8 +292,9 @@ export class CodexChatGptLocalProvider implements BrainProvider {
     body?: string | URLSearchParams;
     timeoutMs?: number;
   }): Promise<{ ok: boolean; status: number; text(): Promise<string>; json(): Promise<unknown> }> {
-    if (this.forceProxy) {
-      return await fetchViaHttpProxy(url, init, this.requireProxyUrl());
+    const proxyUrl = this.forceProxy ? resolveForcedProxyUrl(this.proxyUrl) : undefined;
+    if (proxyUrl) {
+      return await fetchViaHttpProxy(url, init, proxyUrl);
     }
     return await fetch(url, {
       method: init.method,

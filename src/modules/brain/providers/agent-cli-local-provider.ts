@@ -13,7 +13,7 @@ import type {
   BrainProviderRequest,
   BrainProviderResponse,
 } from '../types.ts';
-import { proxyEnvironment, requireForcedProxyUrl } from './proxy.ts';
+import { proxyEnvironmentIfAvailable } from './proxy.ts';
 
 // Several locally installed AI IDEs ship an agent CLI that copies the Claude
 // Code headless contract: `-p` for a single turn, `--output-format json`, a
@@ -400,7 +400,7 @@ export class AgentCliLocalProvider implements BrainProvider {
       maxBuffer: 32 * 1024 * 1024,
       label: this.displayName,
       env: this.forceProxy
-        ? proxyEnvironment(process.env, requireForcedProxyUrl(this.displayName, this.proxyUrl))
+        ? proxyEnvironmentIfAvailable(process.env, this.proxyUrl)
         : process.env,
     });
   }

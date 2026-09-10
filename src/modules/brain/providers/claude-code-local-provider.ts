@@ -13,7 +13,7 @@ import type {
   BrainProviderRequest,
   BrainProviderResponse,
 } from '../types.ts';
-import { fetchViaHttpProxy, proxyEnvironment, requireForcedProxyUrl } from './proxy.ts';
+import { fetchViaHttpProxy, proxyEnvironmentIfAvailable, resolveForcedProxyUrl } from './proxy.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -170,8 +170,9 @@ export class ClaudeCodeLocalProvider implements BrainProvider {
       timeoutMs: 15_000,
     };
     const url = `${CLAUDE_MODELS_ENDPOINT}?limit=1000`;
-    const response = this.forceProxy
-      ? await fetchViaHttpProxy(url, init, this.requireProxyUrl())
+    const proxyUrl = this.forceProxy ? resolveForcedProxyUrl(this.proxyUrl) : undefined;
+    const response = proxyUrl
+      ? await fetchViaHttpProxy(url, init, proxyUrl)
       : await fetchDirect(url, init);
     if (!response.ok) {
       const text = await response.text();
@@ -212,7 +213,7 @@ export class ClaudeCodeLocalProvider implements BrainProvider {
       timeout: this.timeoutMs,
       maxBuffer: 32 * 1024 * 1024,
       env: {
-        ...(this.forceProxy ? proxyEnvironment(process.env, this.requireProxyUrl()) : process.env),
+        ...(this.forceProxy ? proxyEnvironmentIfAvailable(process.env, this.proxyUrl) : process.env),
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC ?? '1',
       },
     });
@@ -248,9 +249,6 @@ export class ClaudeCodeLocalProvider implements BrainProvider {
     };
   }
 
-  private requireProxyUrl(): string {
-    return requireForcedProxyUrl('Claude Code', this.proxyUrl);
-  }
 }
 
 async function resolveClaudeCodeCliPath(configuredCliPath?: string): Promise<string> {

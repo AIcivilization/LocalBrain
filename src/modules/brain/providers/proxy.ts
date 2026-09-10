@@ -28,12 +28,17 @@ export function resolveForcedProxyUrl(configuredProxyUrl?: string): string | und
   return macOSSystemProxyUrl() ?? commonLocalProxyUrl();
 }
 
-export function requireForcedProxyUrl(providerName: string, configuredProxyUrl?: string): string {
+// Routes a child process through the proxy when one can be found, and leaves it
+// on the direct path when none can. Refusing to run without a proxy bought
+// nothing: on a machine whose connectivity comes from a TUN-mode client there is
+// no proxy endpoint to discover, yet direct calls work, so the strict form only
+// broke providers that would otherwise have succeeded.
+export function proxyEnvironmentIfAvailable(
+  baseEnv: NodeJS.ProcessEnv,
+  configuredProxyUrl?: string,
+): NodeJS.ProcessEnv {
   const proxyUrl = resolveForcedProxyUrl(configuredProxyUrl);
-  if (!proxyUrl) {
-    throw new Error(`${providerName} requires a proxy, but no proxy is configured. Set LOCALBRAIN_PROXY_URL or enable the macOS HTTPS proxy.`);
-  }
-  return proxyUrl;
+  return proxyUrl ? proxyEnvironment(baseEnv, proxyUrl) : baseEnv;
 }
 
 export function proxyEnvironment(baseEnv: NodeJS.ProcessEnv, proxyUrl: string): NodeJS.ProcessEnv {

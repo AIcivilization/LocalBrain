@@ -18,7 +18,7 @@ import type {
   BrainProviderRequest,
   BrainProviderResponse,
 } from '../types.ts';
-import { requireForcedProxyUrl } from './proxy.ts';
+import { resolveForcedProxyUrl } from './proxy.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -302,7 +302,12 @@ export class AntigravityLocalBrainProvider implements BrainProvider {
     if (!this.forceProxy) {
       return;
     }
-    const proxyUrl = requireForcedProxyUrl('Antigravity', this.proxyUrl);
+    const proxyUrl = resolveForcedProxyUrl(this.proxyUrl);
+    if (!proxyUrl) {
+      // Nothing to route through, so leave the language server on the direct
+      // path rather than refusing to serve.
+      return;
+    }
     const endpoint = await this.resolveGrpcEndpoint();
     if (!endpoint.pid) {
       throw new Error('Antigravity proxy cannot be verified because the language server process was not found.');
