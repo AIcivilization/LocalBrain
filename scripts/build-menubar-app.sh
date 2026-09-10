@@ -13,8 +13,13 @@ ICONSET="$RESOURCES/LocalBrain.iconset"
 rm -rf "$APP"
 mkdir -p "$MACOS" "$RESOURCES" "$RUNTIME"
 
+# Pin the deployment target to the LSMinimumSystemVersion declared below.
+# Without it swiftc follows the host toolchain's default, which on a beta SDK can
+# exceed the running macOS and make the built app unlaunchable (LaunchServices
+# -10825).
 swiftc "$ROOT/app/LocalBrainStatusApp.swift" \
   -o "$MACOS/LocalBrain" \
+  -target "$(/usr/bin/uname -m)-apple-macos14.0" \
   -framework AppKit \
   -framework Foundation
 

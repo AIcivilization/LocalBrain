@@ -29,6 +29,11 @@ export const AGENT_CLI_VENDORS: AgentCliVendor[] = ['grok', 'qoder', 'workbuddy'
 // offers and is more accurate than any hard-coded table. The prompt has to be
 // non-empty or the CLI returns early without ever validating the model, but it
 // still costs nothing because the request dies before reaching a model.
+// Observed in practice: one refresh round trip is not always enough, and the
+// second 401 still clears on the next attempt. Two retries covers it without
+// making a genuinely signed-out CLI slow to report.
+const MAX_STALE_AUTH_RETRIES = 2;
+
 const WORKBUDDY_MODEL_PROBE = 'localbrain-model-probe';
 const WORKBUDDY_MODEL_PROBE_PROMPT = 'hi';
 
@@ -327,16 +332,19 @@ export class AgentCliLocalProvider implements BrainProvider {
     return stripped === 'default' ? '' : stripped;
   }
 
-  // These CLIs refresh their access token lazily: the first call after an idle
-  // period fails with 401 and the retry, which uses the token the failure just
-  // refreshed, succeeds. Retrying once turns that into a non-event; a CLI that
-  // is genuinely signed out simply fails twice.
+  // These CLIs refresh their access token lazily: calls made after an idle period
+  // fail with 401 until a refresh lands, then succeed with the token those
+  // failures produced. Retrying turns that into a non-event; a CLI that is
+  // genuinely signed out just fails every attempt and reports its own message.
   private async runCli(args: string[], stdin: string): Promise<AgentCliRun> {
-    const first = await this.runCliOnce(args, stdin);
-    if (!looksLikeStaleAuth(`${first.stdout}\n${first.stderr}`)) {
-      return first;
+    let run = await this.runCliOnce(args, stdin);
+    for (let attempt = 0; attempt < MAX_STALE_AUTH_RETRIES; attempt += 1) {
+      if (!looksLikeStaleAuth(`${run.stdout}\n${run.stderr}`)) {
+        return run;
+      }
+      run = await this.runCliOnce(args, stdin);
     }
-    return this.runCliOnce(args, stdin);
+    return run;
   }
 
   private async runCliOnce(args: string[], stdin: string): Promise<AgentCliRun> {
