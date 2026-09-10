@@ -316,6 +316,11 @@ The provider signs in through the vendor's own CLI, so LocalBrain never reads or
 stores a token. Sign in once with that CLI (`grok login`, `qodercli login`, or
 the WorkBuddy app) and the models appear in `/v1/models`.
 
+The CLI's login is not always the IDE's login. Qoder keeps them separate:
+signing in to Qoder IDE leaves `qodercli status` reporting `Not logged in`, and
+the provider stays empty until `qodercli login` runs. Check the CLI, not the
+app, when a vendor lists no models.
+
 WorkBuddy has no list command, so discovery sends a model ID the account cannot
 own; the CLI answers with the catalog it is entitled to. The probe fails before
 any model call, so it costs nothing.
