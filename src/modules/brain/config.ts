@@ -226,6 +226,7 @@ export function registerConfiguredProvider(
       workDir: typeof providerConfig.options?.workDir === 'string' ? providerConfig.options.workDir : undefined,
       timeoutMs: typeof providerConfig.options?.timeoutMs === 'number' ? providerConfig.options.timeoutMs : undefined,
       modelCacheTtlMs: typeof providerConfig.options?.modelCacheTtlMs === 'number' ? providerConfig.options.modelCacheTtlMs : undefined,
+      modelDiscoveryTimeoutMs: typeof providerConfig.options?.modelDiscoveryTimeoutMs === 'number' ? providerConfig.options.modelDiscoveryTimeoutMs : undefined,
       proxyUrl: typeof providerConfig.options?.proxyUrl === 'string' ? providerConfig.options.proxyUrl : undefined,
       forceProxy: typeof providerConfig.options?.forceProxy === 'boolean' ? providerConfig.options.forceProxy : undefined,
       experimental: providerConfig.experimental,

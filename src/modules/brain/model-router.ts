@@ -36,12 +36,13 @@ export class BrainModelRouter {
 
     // Every agent CLI provider publishes its models under its own vendor prefix,
     // so one lookup covers all of them and any vendor added later.
-    const agentCliProvider = Object.entries(this.config.providers).find(([_providerId, provider]) => (
-      provider.type === 'agent-cli-local'
-      && provider.disabled !== true
-      && isAgentCliVendor(provider.options?.vendor)
-      && model.startsWith(agentCliModelPrefix(provider.options.vendor))
-    ));
+    const agentCliProvider = Object.entries(this.config.providers).find(([_providerId, provider]) => {
+      if (provider.type !== 'agent-cli-local' || provider.disabled === true) {
+        return false;
+      }
+      const vendor = provider.options?.vendor;
+      return isAgentCliVendor(vendor) && model.startsWith(agentCliModelPrefix(vendor));
+    });
     if (agentCliProvider) {
       return agentCliProvider[0];
     }

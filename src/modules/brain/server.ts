@@ -1546,16 +1546,25 @@ export class BrainServer {
         });
       }
     }
-    for (const provider of this.options.registry.list()) {
+    // Discovery is per-provider independent, and some providers reach it by
+    // spawning a CLI that takes seconds. Awaiting them in sequence made every
+    // request that needs the catalog pay the sum of all of them; Promise.all
+    // pays the slowest one instead. Order is preserved, so model precedence is
+    // unchanged.
+    const providerModels = await Promise.all(this.options.registry.list().map(async (provider) => {
       if (!provider.listModels) {
-        continue;
+        return [];
       }
       try {
-        for (const model of await provider.listModels()) {
-          addModel(model);
-        }
+        return await provider.listModels();
       } catch {
         // Dynamic model discovery should not make the local gateway unavailable.
+        return [];
+      }
+    }));
+    for (const models of providerModels) {
+      for (const model of models) {
+        addModel(model);
       }
     }
     return [...models.values()]

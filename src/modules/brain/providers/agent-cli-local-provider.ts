@@ -24,16 +24,26 @@ export type AgentCliVendor = 'grok' | 'qoder' | 'workbuddy' | 'workbuddy-ai';
 
 export const AGENT_CLI_VENDORS: AgentCliVendor[] = ['grok', 'qoder', 'workbuddy', 'workbuddy-ai'];
 
+// One refresh round trip is not always enough in practice, and the second 401
+// still clears on the next attempt. Two retries covers it without making a
+// genuinely signed-out CLI slow to report.
+const MAX_STALE_AUTH_RETRIES = 2;
+
+// Model discovery sits in front of ordinary requests, so it must not inherit the
+// generation timeout: a wedged CLI would otherwise hold up a chat request for
+// the full 15 minutes. Generous enough for a cold CLI plus its auth retries.
+const DEFAULT_MODEL_DISCOVERY_TIMEOUT_MS = 45_000;
+
+// A CLI that is signed out stays signed out until the user acts, and each probe
+// costs seconds, so failures are remembered far longer than successes. A fresh
+// login shows up within this window, or immediately after a restart.
+const FAILED_DISCOVERY_CACHE_MS = 5 * 60_000;
+
 // A model the vendor cannot possibly own. WorkBuddy answers an unknown model by
 // printing the catalog its account is entitled to, which is the only listing it
 // offers and is more accurate than any hard-coded table. The prompt has to be
 // non-empty or the CLI returns early without ever validating the model, but it
 // still costs nothing because the request dies before reaching a model.
-// Observed in practice: one refresh round trip is not always enough, and the
-// second 401 still clears on the next attempt. Two retries covers it without
-// making a genuinely signed-out CLI slow to report.
-const MAX_STALE_AUTH_RETRIES = 2;
-
 const WORKBUDDY_MODEL_PROBE = 'localbrain-model-probe';
 const WORKBUDDY_MODEL_PROBE_PROMPT = 'hi';
 
@@ -47,10 +57,14 @@ interface AgentCliModelDiscovery {
 
 interface AgentCliProfile {
   displayName: string;
+  // Vendor name for model labels, kept here so one table holds everything that
+  // varies per vendor.
+  shortName: string;
   modelPrefix: string;
   cliPaths: string[];
-  // Looked up on PATH when no absolute candidate exists.
-  bareCommand: string;
+  // Looked up on PATH when no absolute candidate exists. Omitted when the
+  // command name cannot identify the vendor on its own.
+  bareCommand?: string;
   // Directory of `<name>-<version>` CLI copies, newest wins.
   versionedCliRoot?: string;
   promptDelivery: 'stdin' | 'prompt-file';
@@ -62,6 +76,7 @@ interface AgentCliProfile {
 const PROFILES: Record<AgentCliVendor, AgentCliProfile> = {
   grok: {
     displayName: 'Grok Bot Local Provider',
+    shortName: 'Grok',
     modelPrefix: 'grok/',
     cliPaths: [
       path.join(os.homedir(), '.grok', 'bin', 'grok'),
@@ -97,6 +112,7 @@ const PROFILES: Record<AgentCliVendor, AgentCliProfile> = {
   },
   qoder: {
     displayName: 'Qoder Local Provider',
+    shortName: 'Qoder',
     modelPrefix: 'qoder/',
     cliPaths: [
       path.join(os.homedir(), '.local', 'bin', 'qodercli'),
@@ -128,6 +144,7 @@ const PROFILES: Record<AgentCliVendor, AgentCliProfile> = {
   },
   workbuddy: {
     displayName: 'WorkBuddy Local Provider',
+    shortName: 'WorkBuddy',
     modelPrefix: 'workbuddy/',
     cliPaths: [
       '/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy',
@@ -136,7 +153,9 @@ const PROFILES: Record<AgentCliVendor, AgentCliProfile> = {
       '/opt/homebrew/bin/codebuddy',
       '/usr/local/bin/codebuddy',
     ],
-    bareCommand: 'codebuddy',
+    // No PATH fallback on purpose: both WorkBuddy products ship an identical
+    // `codebuddy` command, so resolving by name could silently drive the other
+    // product's account and endpoint.
     promptDelivery: 'stdin',
     generateArgs: workBuddyGenerateArgs,
     modelDiscovery: {
@@ -148,12 +167,14 @@ const PROFILES: Record<AgentCliVendor, AgentCliProfile> = {
   },
   'workbuddy-ai': {
     displayName: 'WorkBuddy AI Local Provider',
+    shortName: 'WorkBuddy AI',
     modelPrefix: 'workbuddy-ai/',
     cliPaths: [
       '/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy',
       path.join(os.homedir(), 'Applications', 'WorkBuddy AI.app', 'Contents', 'Resources', 'app.asar.unpacked', 'cli', 'bin', 'codebuddy'),
     ],
-    bareCommand: 'codebuddy',
+    // See the WorkBuddy profile: the shared command name makes a PATH fallback
+    // unsafe here too.
     promptDelivery: 'stdin',
     generateArgs: workBuddyGenerateArgs,
     modelDiscovery: {
@@ -189,6 +210,7 @@ export interface AgentCliLocalProviderOptions {
   workDir?: string;
   timeoutMs?: number;
   modelCacheTtlMs?: number;
+  modelDiscoveryTimeoutMs?: number;
   proxyUrl?: string;
   forceProxy?: boolean;
   experimental?: boolean;
@@ -214,6 +236,7 @@ export class AgentCliLocalProvider implements BrainProvider {
   private readonly workDir: string;
   private readonly timeoutMs: number;
   private readonly modelCacheTtlMs: number;
+  private readonly modelDiscoveryTimeoutMs: number;
   private readonly proxyUrl?: string;
   private readonly forceProxy: boolean;
   private readonly experimental: boolean;
@@ -221,6 +244,7 @@ export class AgentCliLocalProvider implements BrainProvider {
     expiresAt: number;
     models: BrainModelDescriptor[];
   };
+  private modelDiscoveryInFlight?: Promise<BrainModelDescriptor[]>;
 
   constructor(options: AgentCliLocalProviderOptions) {
     if (!isAgentCliVendor(options.vendor)) {
@@ -235,6 +259,7 @@ export class AgentCliLocalProvider implements BrainProvider {
       ?? path.join(os.homedir(), 'Library', 'Application Support', 'LocalBrain', `${options.vendor}-workdir`);
     this.timeoutMs = options.timeoutMs ?? 900_000;
     this.modelCacheTtlMs = options.modelCacheTtlMs ?? 60_000;
+    this.modelDiscoveryTimeoutMs = options.modelDiscoveryTimeoutMs ?? DEFAULT_MODEL_DISCOVERY_TIMEOUT_MS;
     this.proxyUrl = options.proxyUrl;
     this.forceProxy = options.forceProxy ?? this.profile.forceProxyByDefault;
     this.experimental = options.experimental ?? true;
@@ -254,26 +279,41 @@ export class AgentCliLocalProvider implements BrainProvider {
   }
 
   async listModels(): Promise<BrainModelDescriptor[]> {
-    const now = Date.now();
-    if (this.modelCache && this.modelCache.expiresAt > now) {
+    if (this.modelCache && this.modelCache.expiresAt > Date.now()) {
       return this.modelCache.models;
     }
 
+    // Discovery spawns a CLI process and can take seconds, while the gateway
+    // asks for the catalog on nearly every request. Concurrent callers share one
+    // run instead of each starting their own.
+    this.modelDiscoveryInFlight ??= this.refreshModels().finally(() => {
+      this.modelDiscoveryInFlight = undefined;
+    });
+    return this.modelDiscoveryInFlight;
+  }
+
+  private async refreshModels(): Promise<BrainModelDescriptor[]> {
     let models: BrainModelDescriptor[] = [];
+    let ok = false;
     try {
       models = (await this.discoverModels()).map((id) => ({
         id: `${this.profile.modelPrefix}${id}`,
         providerId: this.id,
-        displayName: `${shortVendorName(this.vendor)} ${id}`,
+        displayName: `${this.profile.shortName} ${id}`,
       }));
+      ok = true;
     } catch (error) {
       // A signed-out CLI is the common case and must not break `/v1/models` for
       // every other provider, so discovery degrades to an empty catalog.
       console.warn(`[${this.id}] model discovery failed: ${error instanceof Error ? error.message : String(error)}`);
     }
 
+    // An empty catalog from a CLI that answered is still a failure to report
+    // anything, and re-probing it every minute is what makes a signed-out
+    // provider expensive.
+    const ttl = ok && models.length > 0 ? this.modelCacheTtlMs : FAILED_DISCOVERY_CACHE_MS;
     this.modelCache = {
-      expiresAt: now + this.modelCacheTtlMs,
+      expiresAt: Date.now() + ttl,
       models,
     };
     return models;
@@ -281,7 +321,7 @@ export class AgentCliLocalProvider implements BrainProvider {
 
   private async discoverModels(): Promise<string[]> {
     const discovery = this.profile.modelDiscovery;
-    const { stdout, stderr } = await this.runCli(discovery.args, discovery.stdin ?? '');
+    const { stdout, stderr } = await this.runCli(discovery.args, discovery.stdin ?? '', this.modelDiscoveryTimeoutMs);
     return discovery.parse(`${stdout}\n${stderr}`);
   }
 
@@ -298,7 +338,7 @@ export class AgentCliLocalProvider implements BrainProvider {
 
     try {
       const args = this.profile.generateArgs(cliModel, promptFile);
-      const run = await this.runCli(args, promptFile ? '' : prompt);
+      const run = await this.runCli(args, promptFile ? '' : prompt, this.timeoutMs);
       const content = extractAgentCliResult(run, this.displayName);
 
       return {
@@ -336,23 +376,27 @@ export class AgentCliLocalProvider implements BrainProvider {
   // fail with 401 until a refresh lands, then succeed with the token those
   // failures produced. Retrying turns that into a non-event; a CLI that is
   // genuinely signed out just fails every attempt and reports its own message.
-  private async runCli(args: string[], stdin: string): Promise<AgentCliRun> {
-    let run = await this.runCliOnce(args, stdin);
+  private async runCli(args: string[], stdin: string, timeoutMs: number): Promise<AgentCliRun> {
+    const deadline = Date.now() + timeoutMs;
+    let run = await this.runCliOnce(args, stdin, timeoutMs);
     for (let attempt = 0; attempt < MAX_STALE_AUTH_RETRIES; attempt += 1) {
-      if (!looksLikeStaleAuth(`${run.stdout}\n${run.stderr}`)) {
+      const remaining = deadline - Date.now();
+      // Retries share the caller's budget rather than multiplying it, so a
+      // signed-out CLI cannot stall a request for three full timeouts.
+      if (!looksLikeStaleAuth(run) || remaining <= 0) {
         return run;
       }
-      run = await this.runCliOnce(args, stdin);
+      run = await this.runCliOnce(args, stdin, remaining);
     }
     return run;
   }
 
-  private async runCliOnce(args: string[], stdin: string): Promise<AgentCliRun> {
+  private async runCliOnce(args: string[], stdin: string, timeoutMs: number): Promise<AgentCliRun> {
     await mkdir(this.workDir, { recursive: true });
     const cliPath = await this.resolveCliPath();
     return runAgentCli(cliPath, args, stdin, {
       cwd: this.workDir,
-      timeout: this.timeoutMs,
+      timeout: timeoutMs,
       maxBuffer: 32 * 1024 * 1024,
       label: this.displayName,
       env: this.forceProxy
@@ -374,8 +418,14 @@ export class AgentCliLocalProvider implements BrainProvider {
         return candidate;
       }
     }
-    // Last resort: let PATH resolve it, so a fresh install works without config.
-    return this.profile.bareCommand;
+    if (this.profile.bareCommand) {
+      // Let PATH resolve it, so a fresh install works without config.
+      return this.profile.bareCommand;
+    }
+    throw new Error(
+      `${this.displayName}: CLI not found. Looked in ${this.profile.cliPaths.join(', ')}. `
+      + 'Install the app, or set options.cliPath to the CLI you want this provider to drive.',
+    );
   }
 }
 
@@ -411,7 +461,15 @@ function compareVersionLike(left: string, right: string): number {
   return left.localeCompare(right);
 }
 
-function looksLikeStaleAuth(text: string): boolean {
+// Only a failed run can be a stale-auth failure. Scanning successful output too
+// would re-run the whole generation whenever an answer happens to mention 401.
+// A stale-auth failure shows up either as a non-zero exit or, as WorkBuddy does
+// it, as an empty stdout with the 401 on stderr.
+function looksLikeStaleAuth(run: AgentCliRun): boolean {
+  if (run.exitCode === 0 && run.stdout.trim().length > 0) {
+    return false;
+  }
+  const text = `${run.stdout}\n${run.stderr}`;
   return /\b401\b/.test(text) || /authentication required/i.test(text);
 }
 
@@ -421,19 +479,6 @@ async function isExecutable(value: string): Promise<boolean> {
     return true;
   } catch {
     return false;
-  }
-}
-
-function shortVendorName(vendor: AgentCliVendor): string {
-  switch (vendor) {
-    case 'grok':
-      return 'Grok';
-    case 'qoder':
-      return 'Qoder';
-    case 'workbuddy':
-      return 'WorkBuddy';
-    case 'workbuddy-ai':
-      return 'WorkBuddy AI';
   }
 }
 
@@ -506,15 +551,9 @@ export function extractAgentCliResult(run: AgentCliRun, label: string): AgentCli
   }
 
   const text = result ?? message ?? contentBlocksToText(record.content) ?? trimmed;
-  const usage = record.usage as Record<string, unknown> | undefined;
   return {
     text,
-    usage: usage
-      ? {
-        inputTokens: numberField(usage, 'input_tokens'),
-        outputTokens: numberField(usage, 'output_tokens'),
-      }
-      : undefined,
+    usage: toUsage(record.usage),
     raw: {
       type: record.type,
       subtype: record.subtype,
@@ -587,6 +626,21 @@ function contentBlocksToText(value: unknown): string | undefined {
   return parts.length > 0 ? parts.join('') : undefined;
 }
 
+// Undefined rather than a hollow object when the CLI reported no numbers, so the
+// caller's character-count estimate still applies.
+function toUsage(value: unknown): { inputTokens?: number; outputTokens?: number } | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const inputTokens = numberField(record, 'input_tokens');
+  const outputTokens = numberField(record, 'output_tokens');
+  if (inputTokens === undefined && outputTokens === undefined) {
+    return undefined;
+  }
+  return { inputTokens, outputTokens };
+}
+
 function stringField(record: Record<string, unknown>, key: string): string | undefined {
   const value = record[key];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
@@ -639,6 +693,7 @@ function runAgentCli(
     const stderr: Buffer[] = [];
     let stdoutBytes = 0;
     let stderrBytes = 0;
+    let truncated = false;
     let settled = false;
     const timer = setTimeout(() => {
       if (settled) {
@@ -652,6 +707,7 @@ function runAgentCli(
     child.stdout.on('data', (chunk: Buffer) => {
       stdoutBytes += chunk.byteLength;
       if (stdoutBytes > options.maxBuffer) {
+        truncated = true;
         child.kill('SIGTERM');
         return;
       }
@@ -660,6 +716,7 @@ function runAgentCli(
     child.stderr.on('data', (chunk: Buffer) => {
       stderrBytes += chunk.byteLength;
       if (stderrBytes > options.maxBuffer) {
+        truncated = true;
         child.kill('SIGTERM');
         return;
       }
@@ -679,6 +736,12 @@ function runAgentCli(
       }
       settled = true;
       clearTimeout(timer);
+      if (truncated) {
+        // The captured output is a fragment; parsing it would hand the caller a
+        // chopped payload dressed up as an answer.
+        reject(new Error(`${options.label} exceeded ${options.maxBuffer} bytes of output and was stopped`));
+        return;
+      }
       // A non-zero exit is how these CLIs report "not signed in" and similar,
       // and their own message reads better than an exit code, so the caller
       // classifies the run instead of this helper.

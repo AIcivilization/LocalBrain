@@ -361,10 +361,18 @@ traffic is pushed through the configured proxy, and a provider with
 `forceProxy: true` refuses to run when no proxy is available. Grok defaults to
 `true`; the others reach their endpoints directly.
 
-These CLIs refresh their access token lazily, so the first call after an idle
-period fails with `401` and the immediate retry succeeds. The provider retries
-once for that reason; a CLI that is genuinely signed out fails twice and reports
-the CLI's own message, such as `Not logged in - Please run /login`.
+These CLIs refresh their access token lazily, so calls after an idle period fail
+with `401` until a refresh lands. The provider retries twice for that reason,
+sharing the caller's timeout budget rather than multiplying it; a CLI that is
+genuinely signed out fails every attempt and reports the CLI's own message, such
+as `Not logged in - Please run /login`.
+
+Discovery does not inherit the generation timeout - it runs in front of ordinary
+requests, so it uses `options.modelDiscoveryTimeoutMs` (45s by default) instead
+of the 15 minutes a real agent run may need. A discovery that returns nothing is
+cached for five minutes rather than the usual minute, because a signed-out CLI
+stays signed out until the user acts and each probe costs seconds. After signing
+in, models appear within that window, or immediately after a restart.
 
 ### Adding another vendor
 
