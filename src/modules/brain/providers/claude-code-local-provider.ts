@@ -12,6 +12,7 @@ import type {
   BrainProviderDescriptor,
   BrainProviderRequest,
   BrainProviderResponse,
+  BrainProviderStatus,
 } from '../types.ts';
 import { fetchViaHttpProxy, proxyEnvironmentIfAvailable, resolveForcedProxyUrl } from './proxy.ts';
 
@@ -69,6 +70,14 @@ export class ClaudeCodeLocalProvider implements BrainProvider {
     expiresAt: number;
     models: BrainModelDescriptor[];
   };
+  // Whether the last listing came from the live catalog (signed in) or the
+  // static family aliases (signed out / offline), so status can say which.
+  private lastDiscovery?: {
+    at: string;
+    live: boolean;
+    modelCount: number;
+    error?: string;
+  };
 
   constructor(options: ClaudeCodeLocalProviderOptions) {
     this.id = options.id;
@@ -106,26 +115,60 @@ export class ClaudeCodeLocalProvider implements BrainProvider {
     // when the user is logged out or the request fails, so listing never throws
     // and the gateway stays usable.
     let models: BrainModelDescriptor[] | undefined;
+    let failure: string | undefined;
     try {
       models = await this.discoverModels();
     } catch (error) {
       // Being signed out is the normal, quiet path. Anything else (e.g. the API
       // rejecting the token) is worth surfacing so the live path can be fixed
       // instead of silently degrading to the fallback forever.
+      failure = error instanceof Error ? error.message : String(error);
       if (!(error instanceof SignedOutError)) {
-        console.warn(`[${this.id}] live model discovery failed: ${error instanceof Error ? error.message : String(error)}`);
+        console.warn(`[${this.id}] live model discovery failed: ${failure}`);
       }
       models = undefined;
     }
+    const live = (models?.length ?? 0) > 0;
     if (!models || models.length === 0) {
       models = CLAUDE_FALLBACK_FAMILIES.map((family) => this.familyDescriptor(family));
     }
+    this.lastDiscovery = {
+      at: new Date().toISOString(),
+      live,
+      modelCount: models.length,
+      error: failure,
+    };
 
     this.modelCache = {
       expiresAt: now + this.modelCacheTtlMs,
       models,
     };
     return models;
+  }
+
+  // The CLI carries its own login, so generation can work while the catalog
+  // fetch cannot. Report the catalog state and say the aliases still serve.
+  checkStatus(): BrainProviderStatus {
+    const discovery = this.lastDiscovery;
+    const dependency = {
+      kind: 'cli' as const,
+      name: 'claude',
+      path: this.configuredCliPath,
+      found: true,
+    };
+    if (!discovery) {
+      return { providerId: this.id, state: 'unknown', dependency };
+    }
+    return {
+      providerId: this.id,
+      // Falling back to the family aliases still leaves a usable provider, so
+      // this is not an error - it is a catalog that could not be read live.
+      state: discovery.live ? 'ready' : 'signed-out',
+      dependency,
+      modelCount: discovery.modelCount,
+      checkedAt: discovery.at,
+      error: discovery.live ? undefined : (discovery.error ?? 'Claude Code is not signed in; using built-in model families'),
+    };
   }
 
   private familyDescriptor(family: string): BrainModelDescriptor {

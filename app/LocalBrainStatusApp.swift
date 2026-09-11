@@ -213,6 +213,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate, NSMenuDelegate
         menu.addItem(coloredItem(title: compactTopStatusTitle(), ok: serviceOK && !hasChannelErrors && !hasUnstableChannels, warning: serviceOK && !hasChannelErrors && hasUnstableChannels))
         menu.addItem(disabledItem(recommendedChannelTitle()))
         menu.addItem(disabledItem(todayUsageTitle()))
+        menu.addItem(disabledItem(proxyStatusTitle()))
         menu.addItem(NSMenuItem.separator())
 
         // 接产品的两样东西（base URL + key）一次拿走，不必再翻通道子菜单。
@@ -262,6 +263,65 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate, NSMenuDelegate
         return selected.isEmpty
             ? text("Default Model", "默认模型")
             : text("Default Model: \(selected)", "默认模型：\(selected)")
+    }
+
+    // 代理是否生效由一个四级查找决定，而查找结果以前完全不可见：Claude 那次挂掉，
+    // 表现只是"这个来源没有模型"，看不出是代理没探测到。
+    private func proxyStatusTitle() -> String {
+        let proxy = lastState["proxy"] as? [String: Any] ?? [:]
+        let source = proxy["source"] as? String ?? "none"
+        guard let url = proxy["url"] as? String, !url.isEmpty else {
+            return text("Proxy: none detected (direct)", "代理：未探测到（直连）")
+        }
+        let origin: String
+        switch source {
+        case "config": origin = text("config", "配置")
+        case "env": origin = (proxy["envVar"] as? String) ?? "env"
+        case "system": origin = text("system", "系统")
+        case "local-port": origin = text("local port", "本地端口")
+        default: origin = source
+        }
+        return text("Proxy: \(url) (\(origin))", "代理：\(url)（\(origin)）")
+    }
+
+    private func providerStatus(for providerId: String) -> [String: Any]? {
+        let statuses = lastState["providerStatus"] as? [[String: Any]] ?? []
+        return statuses.first { ($0["providerId"] as? String) == providerId }
+    }
+
+    // 状态从服务端拿到的是分类而不是句子，措辞留在 UI 层，双语才不会各写一遍。
+    private func providerStatusItems(for providerId: String) -> [NSMenuItem] {
+        guard let status = providerStatus(for: providerId) else { return [] }
+        let state = status["state"] as? String ?? "unknown"
+        let modelCount = status["modelCount"] as? Int ?? 0
+        var items: [NSMenuItem] = []
+
+        switch state {
+        case "ready":
+            items.append(coloredItem(title: text("Status: ready · \(modelCount) models", "状态：可用 · \(modelCount) 个模型"), ok: true))
+        case "signed-out":
+            items.append(coloredItem(title: text("Status: signed out", "状态：未登录"), ok: false, warning: true))
+        case "missing-dependency":
+            let name = (status["dependency"] as? [String: Any])?["name"] as? String ?? "CLI"
+            items.append(coloredItem(title: text("Status: \(name) not found", "状态：未找到 \(name)"), ok: false))
+        case "error":
+            items.append(coloredItem(title: text("Status: discovery failed", "状态：模型发现失败"), ok: false))
+        default:
+            items.append(disabledItem(text("Status: unknown", "状态：未知")))
+        }
+
+        // CLI 自己的原话，通常直接写着该敲哪条命令，不翻译。
+        if let error = status["error"] as? String, !error.isEmpty, state != "ready" {
+            items.append(disabledItem(compactLabel(error, maxLength: 78)))
+        }
+        if let dependency = status["dependency"] as? [String: Any],
+           let path = dependency["path"] as? String, !path.isEmpty {
+            items.append(disabledItem(compactLabel(path, maxLength: 78)))
+        }
+        if let checkedAt = status["checkedAt"] as? String, !checkedAt.isEmpty {
+            items.append(disabledItem(text("Checked: \(lastTestTimeText(checkedAt))", "检查于：\(lastTestTimeText(checkedAt))")))
+        }
+        return items
     }
 
     private func modelSourcesRootTitle() -> String {
@@ -682,51 +742,57 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private func providerSourceMenu(providerId: String, displayName: String) -> NSMenu {
         let menu = NSMenu()
-        switch providerId {
-        case "codex-chatgpt-local":
-            menu.addItem(actionItem(text("Check / Configure Codex", "\u{68C0}\u{67E5} / \u{914D}\u{7F6E} Codex"), #selector(configureCodex)))
+        menu.addItem(disabledItem(displayName))
+
+        // 每个来源都渲染同一套状态，不再只有 Claude Code 一家有登录提示。
+        let statusItems = providerStatusItems(for: providerId)
+        if !statusItems.isEmpty {
             menu.addItem(NSMenuItem.separator())
-        case "claude-code-local":
-            menu.addItem(claudeCodeStatusItem())
-            menu.addItem(actionItem(text("Check / Configure Claude Code", "\u{68C0}\u{67E5} / \u{914D}\u{7F6E} Claude Code"), #selector(configureClaudeCode)))
-            menu.addItem(NSMenuItem.separator())
-        case "opencode-local":
-            menu.addItem(actionItem(text("Check / Configure OpenCode", "\u{68C0}\u{67E5} / \u{914D}\u{7F6E} OpenCode"), #selector(configureOpenCode)))
-            menu.addItem(NSMenuItem.separator())
-        case "antigravity-local":
-            menu.addItem(actionItem(text("Check / Configure Antigravity", "\u{68C0}\u{67E5} / \u{914D}\u{7F6E} Antigravity"), #selector(configureAntigravity)))
-            menu.addItem(NSMenuItem.separator())
-        default:
-            menu.addItem(disabledItem(displayName))
-            menu.addItem(NSMenuItem.separator())
+            for item in statusItems {
+                menu.addItem(item)
+            }
         }
+
+        // 登录/配置流程每家不同，有专门入口的才显示。
+        if let configure = configureActionItem(for: providerId) {
+            menu.addItem(NSMenuItem.separator())
+            menu.addItem(configure)
+        }
+
+        menu.addItem(NSMenuItem.separator())
         addProviderFilterItems(to: menu, providerId: providerId)
         return menu
     }
 
-    private func claudeCodeStatusItem() -> NSMenuItem {
-        let claude = lastState["claudeCode"] as? [String: Any] ?? [:]
-        // `hasCli` is only present once the background refresh has evaluated Claude.
-        guard let hasCli = claude["hasCli"] as? Bool else {
-            return findClaudeCode() != nil
-                ? coloredItem(title: text("Status: checking sign-in…", "状态：正在检测登录…"), ok: false, warning: true)
-                : coloredItem(title: text("Status: Claude Code CLI not found", "状态：未找到 Claude Code CLI"), ok: false)
+    private func configureActionItem(for providerId: String) -> NSMenuItem? {
+        switch providerId {
+        case "codex-chatgpt-local":
+            return actionItem(text("Check / Configure Codex", "检查 / 配置 Codex"), #selector(configureCodex))
+        case "claude-code-local":
+            return actionItem(text("Check / Configure Claude Code", "检查 / 配置 Claude Code"), #selector(configureClaudeCode))
+        case "opencode-local":
+            return actionItem(text("Check / Configure OpenCode", "检查 / 配置 OpenCode"), #selector(configureOpenCode))
+        case "antigravity-local":
+            return actionItem(text("Check / Configure Antigravity", "检查 / 配置 Antigravity"), #selector(configureAntigravity))
+        default:
+            return nil
         }
-        if !hasCli {
-            return coloredItem(title: text("Status: Claude Code CLI not found", "状态：未找到 Claude Code CLI"), ok: false)
-        }
-        if (claude["loggedIn"] as? Bool) == true {
-            return coloredItem(title: text("Status: signed in", "状态：已登录"), ok: true)
-        }
-        return coloredItem(title: text("Status: signed out — sign in via \u{201C}Configure\u{201D} below", "状态：未登录 —— 请用下方\u{201C}检查 / 配置\u{201D}登录"), ok: false, warning: true)
     }
 
     private func providerSourceTitle(displayName: String, providerId: String) -> String {
         let enabled = providerFilterEnabled(providerId: providerId)
         let freeOnly = providerFilterFreeOnly(providerId: providerId)
-        let status = enabled ? text("On", "\u{5F00}") : text("Off", "\u{5173}")
-        let free = freeOnly ? text(", free only", "\u{FF0C}\u{53EA}\u{514D}\u{8D39}") : ""
-        return "\(displayName): \(status)\(free)"
+        let status = enabled ? text("On", "开") : text("Off", "关")
+        let free = freeOnly ? text(", free only", "，只免费") : ""
+        // 前缀直接说这个来源现在能不能用，省得为了排查逐个展开。
+        let marker: String
+        switch providerStatus(for: providerId)?["state"] as? String {
+        case "ready": marker = "● "
+        case "signed-out", "missing-dependency": marker = "○ "
+        case "error": marker = "✕ "
+        default: marker = "· "
+        }
+        return "\(marker)\(displayName): \(status)\(free)"
     }
 
     private func providerDisplayName(providerId: String, fallback: String?) -> String {

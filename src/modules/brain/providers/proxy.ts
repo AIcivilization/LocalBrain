@@ -12,20 +12,56 @@ export interface ProxyFetchResponse {
   json(): Promise<unknown>;
 }
 
-export function resolveForcedProxyUrl(configuredProxyUrl?: string): string | undefined {
+export interface ProxyResolution {
+  url?: string;
+  // Which of the four lookups answered, so the UI can say where the value came
+  // from instead of just showing an address.
+  source: 'config' | 'env' | 'system' | 'local-port' | 'none';
+  envVar?: string;
+}
+
+const PROXY_ENV_KEYS = [
+  'LOCALBRAIN_PROXY_URL',
+  'BRAIN_PROXY_URL',
+  'HTTPS_PROXY',
+  'https_proxy',
+  'HTTP_PROXY',
+  'http_proxy',
+  'ALL_PROXY',
+  'all_proxy',
+];
+
+// The whole lookup, with its answer labelled. A proxy that cannot be found is a
+// normal outcome (TUN-mode clients expose no endpoint), but it decides whether
+// traffic is proxied, so it is worth showing rather than inferring from silence.
+export function describeProxy(configuredProxyUrl?: string): ProxyResolution {
   const configured = normalizeProxyUrl(configuredProxyUrl);
   if (configured) {
-    return configured;
+    return { url: configured, source: 'config' };
   }
 
-  for (const key of ['LOCALBRAIN_PROXY_URL', 'BRAIN_PROXY_URL', 'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy']) {
+  for (const key of PROXY_ENV_KEYS) {
     const value = normalizeProxyUrl(process.env[key]);
     if (value) {
-      return value;
+      return { url: value, source: 'env', envVar: key };
     }
   }
 
-  return macOSSystemProxyUrl() ?? commonLocalProxyUrl();
+  const system = macOSSystemProxyUrl();
+  if (system) {
+    return { url: system, source: 'system' };
+  }
+
+  const local = commonLocalProxyUrl();
+  if (local) {
+    return { url: local, source: 'local-port' };
+  }
+
+  return { source: 'none' };
+}
+
+export function resolveForcedProxyUrl(configuredProxyUrl?: string): string | undefined {
+  return describeProxy(configuredProxyUrl).url;
 }
 
 // Routes a child process through the proxy when one can be found, and leaves it

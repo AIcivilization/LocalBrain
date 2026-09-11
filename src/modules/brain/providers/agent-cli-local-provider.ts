@@ -12,6 +12,7 @@ import type {
   BrainProviderDescriptor,
   BrainProviderRequest,
   BrainProviderResponse,
+  BrainProviderStatus,
 } from '../types.ts';
 import { proxyEnvironmentIfAvailable } from './proxy.ts';
 
@@ -245,6 +246,14 @@ export class AgentCliLocalProvider implements BrainProvider {
     models: BrainModelDescriptor[];
   };
   private modelDiscoveryInFlight?: Promise<BrainModelDescriptor[]>;
+  // What the last discovery learned, kept so status costs nothing to report.
+  private lastDiscovery?: {
+    at: string;
+    modelCount: number;
+    cliPath?: string;
+    error?: string;
+  };
+  private lastDiscoveryOutput?: string;
 
   constructor(options: AgentCliLocalProviderOptions) {
     if (!isAgentCliVendor(options.vendor)) {
@@ -295,18 +304,38 @@ export class AgentCliLocalProvider implements BrainProvider {
   private async refreshModels(): Promise<BrainModelDescriptor[]> {
     let models: BrainModelDescriptor[] = [];
     let ok = false;
+    let failure: string | undefined;
+    let cliPath: string | undefined;
     try {
-      models = (await this.discoverModels()).map((id) => ({
-        id: `${this.profile.modelPrefix}${id}`,
-        providerId: this.id,
-        displayName: `${this.profile.shortName} ${id}`,
-      }));
-      ok = true;
+      cliPath = await this.resolveCliPath();
     } catch (error) {
-      // A signed-out CLI is the common case and must not break `/v1/models` for
-      // every other provider, so discovery degrades to an empty catalog.
-      console.warn(`[${this.id}] model discovery failed: ${error instanceof Error ? error.message : String(error)}`);
+      failure = error instanceof Error ? error.message : String(error);
     }
+
+    if (!failure) {
+      try {
+        models = (await this.discoverModels()).map((id) => ({
+          id: `${this.profile.modelPrefix}${id}`,
+          providerId: this.id,
+          displayName: `${this.profile.shortName} ${id}`,
+        }));
+        ok = true;
+      } catch (error) {
+        // A signed-out CLI is the common case and must not break `/v1/models`
+        // for every other provider, so discovery degrades to an empty catalog.
+        failure = error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    if (failure) {
+      console.warn(`[${this.id}] model discovery failed: ${failure}`);
+    }
+    this.lastDiscovery = {
+      at: new Date().toISOString(),
+      modelCount: models.length,
+      cliPath,
+      error: failure ?? (models.length === 0 ? this.lastDiscoveryHint() : undefined),
+    };
 
     // An empty catalog from a CLI that answered is still a failure to report
     // anything, and re-probing it every minute is what makes a signed-out
@@ -319,10 +348,53 @@ export class AgentCliLocalProvider implements BrainProvider {
     return models;
   }
 
+  // Derived entirely from the last discovery, so the menu can ask on every
+  // refresh without spawning anything.
+  checkStatus(): BrainProviderStatus {
+    const discovery = this.lastDiscovery;
+    const dependency = {
+      kind: 'cli' as const,
+      name: this.profile.bareCommand ?? this.profile.cliPaths[0].split('/').pop() ?? 'CLI',
+      path: discovery?.cliPath,
+      found: discovery?.cliPath !== undefined,
+    };
+
+    if (!discovery) {
+      return { providerId: this.id, state: 'unknown', dependency };
+    }
+    const base = {
+      providerId: this.id,
+      dependency,
+      modelCount: discovery.modelCount,
+      checkedAt: discovery.at,
+      error: discovery.error,
+    };
+    if (discovery.modelCount > 0) {
+      return { ...base, state: 'ready' };
+    }
+    if (!discovery.cliPath) {
+      return { ...base, state: 'missing-dependency' };
+    }
+    return { ...base, state: looksSignedOut(discovery.error) ? 'signed-out' : 'error' };
+  }
+
+  // Discovery can succeed as a process and still report nothing, which for these
+  // CLIs means the catalog was refused rather than empty. The CLI's own prose
+  // says which, so prefer it over a generic line.
+  private lastDiscoveryHint(): string {
+    return this.lastDiscoveryOutput || `${this.displayName} returned no models`;
+  }
+
   private async discoverModels(): Promise<string[]> {
     const discovery = this.profile.modelDiscovery;
     const { stdout, stderr } = await this.runCli(discovery.args, discovery.stdin ?? '', this.modelDiscoveryTimeoutMs);
-    return discovery.parse(`${stdout}\n${stderr}`);
+    const output = `${stdout}\n${stderr}`;
+    const models = discovery.parse(output);
+    // A CLI that lists nothing usually said why in prose the parser drops
+    // ("Not logged in. Run `qodercli login`"). Keep it so status can tell a
+    // signed-out CLI apart from one that genuinely has no models.
+    this.lastDiscoveryOutput = models.length === 0 ? output.trim().slice(0, 400) : undefined;
+    return models;
   }
 
   async generate(request: BrainProviderRequest): Promise<BrainProviderResponse> {
@@ -465,6 +537,19 @@ function compareVersionLike(left: string, right: string): number {
 // would re-run the whole generation whenever an answer happens to mention 401.
 // A stale-auth failure shows up either as a non-zero exit or, as WorkBuddy does
 // it, as an empty stdout with the 401 on stderr.
+// These CLIs all say it differently ("Not logged in", "Not signed in",
+// "Authentication required", a bare 401), so match the shapes rather than one
+// vendor's wording.
+function looksSignedOut(text?: string): boolean {
+  if (!text) {
+    return false;
+  }
+  return /not (logged|signed) in/i.test(text)
+    || /authentication required/i.test(text)
+    || /\b401\b/.test(text)
+    || /please run .{0,20}login/i.test(text);
+}
+
 function looksLikeStaleAuth(run: AgentCliRun): boolean {
   if (run.exitCode === 0 && run.stdout.trim().length > 0) {
     return false;

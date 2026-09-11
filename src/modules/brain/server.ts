@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { registerConfiguredProvider } from './config.ts';
-import type { BrainConfig, BrainModelDescriptor, BrainProductRequest, BrainProviderConfig, BrainServerConfig } from './types.ts';
+import { describeProxy } from './providers/proxy.ts';
+import type { BrainConfig, BrainModelDescriptor, BrainProductRequest, BrainProviderConfig, BrainProviderStatus, BrainServerConfig } from './types.ts';
 import type { BrainRuntime } from './brain-runtime.ts';
 import type { BrainProviderRegistry } from './provider-registry.ts';
 import {
@@ -1180,6 +1181,11 @@ export class BrainServer {
       availableFreeModels: models.filter((model) => model.free === true).map((model) => model.id),
       availableModelDetails: models,
       providers: this.options.registry.list().map((provider) => provider.describe()),
+      // Whether traffic is proxied is decided by a lookup with four sources and
+      // no visible result; a provider failing because none of them answered used
+      // to be indistinguishable from any other failure.
+      proxy: describeProxy(),
+      providerStatus: this.providerStatuses(models),
       modelProviderFilters,
       upstreamProviders,
       requireAuth: this.serverConfig.requireAuth,
@@ -1571,6 +1577,30 @@ export class BrainServer {
       .filter((model) => this.isModelAllowedByProviderFilter(model))
       .filter((model) => !freeOnly || model.free === true)
       .sort((left, right) => left.id.localeCompare(right.id));
+  }
+
+  // Providers that report their own state win; the rest get a baseline derived
+  // from whether they contributed models, so the UI can render all of them the
+  // same way instead of showing a blank for anything not yet instrumented.
+  private providerStatuses(models: BrainModelDescriptor[]): BrainProviderStatus[] {
+    const countByProvider = new Map<string, number>();
+    for (const model of models) {
+      if (model.providerId) {
+        countByProvider.set(model.providerId, (countByProvider.get(model.providerId) ?? 0) + 1);
+      }
+    }
+    return this.options.registry.list().map((provider) => {
+      const reported = provider.checkStatus?.();
+      if (reported) {
+        return reported;
+      }
+      const modelCount = countByProvider.get(provider.id) ?? 0;
+      return {
+        providerId: provider.id,
+        state: modelCount > 0 ? 'ready' : 'unknown',
+        modelCount,
+      } satisfies BrainProviderStatus;
+    });
   }
 
   private async constrainToAllowedModels(request: BrainProductRequest): Promise<BrainProductRequest> {

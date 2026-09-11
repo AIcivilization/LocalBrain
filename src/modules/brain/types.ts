@@ -103,6 +103,48 @@ export interface BrainProvider {
   generate(request: BrainProviderRequest): Promise<BrainProviderResponse>;
   generateImage?(request: BrainImageGenerationRequest): Promise<BrainImageGenerationResponse>;
   listModels?(): Promise<BrainModelDescriptor[]>;
+  // Reports why the provider is or is not usable. Must be cheap: it reads what
+  // the last discovery already learned rather than probing again, so the UI can
+  // ask for it on every refresh.
+  checkStatus?(): BrainProviderStatus;
+}
+
+// What a provider needs present on this machine before it can answer. The shape
+// of that dependency is what makes each provider fail differently, so naming it
+// lets one piece of UI explain all of them.
+export type BrainProviderDependencyKind =
+  | 'none'
+  | 'cli'
+  | 'local-service'
+  | 'credential-file'
+  | 'api-key';
+
+export interface BrainProviderDependency {
+  kind: BrainProviderDependencyKind;
+  // What to look for, e.g. `codebuddy` or `Antigravity language server`.
+  name: string;
+  path?: string;
+  found: boolean;
+}
+
+// A state rather than a sentence: the menu bar renders in two languages, so the
+// wording belongs to the UI and only the classification travels.
+export type BrainProviderState =
+  | 'ready'
+  | 'signed-out'
+  | 'missing-dependency'
+  | 'error'
+  | 'unknown';
+
+export interface BrainProviderStatus {
+  providerId: string;
+  state: BrainProviderState;
+  dependency?: BrainProviderDependency;
+  modelCount?: number;
+  checkedAt?: string;
+  // The vendor CLI's own words. Untranslatable, and worth showing verbatim
+  // because it usually names the exact command that fixes the problem.
+  error?: string;
 }
 
 export interface BrainProviderDescriptor {
