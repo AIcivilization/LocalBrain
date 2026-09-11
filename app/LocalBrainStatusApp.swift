@@ -42,7 +42,6 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var menu = NSMenu()
     private var serverProcess: Process?
     private var serverLogHandle: FileHandle?
-    private var showKeys = false
     private var lastState: [String: Any] = [:]
     private var refreshFailureCount = 0
     private var refreshInFlight = false
@@ -209,37 +208,67 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate, NSMenuDelegate
         let channels = channelSummaries()
         let hasChannelErrors = channels.contains { channelHealthLevel($0) == .error }
         let hasUnstableChannels = channels.contains { channelHealthLevel($0) == .unstable }
+
+        // 第一层只放两类东西：此刻的状态，和最高频的动作。
         menu.addItem(coloredItem(title: compactTopStatusTitle(), ok: serviceOK && !hasChannelErrors && !hasUnstableChannels, warning: serviceOK && !hasChannelErrors && hasUnstableChannels))
         menu.addItem(disabledItem(recommendedChannelTitle()))
         menu.addItem(disabledItem(todayUsageTitle()))
-        menu.addItem(actionItem(text("Open Console", "\u{6253}\u{5F00}\u{63A7}\u{5236}\u{53F0}"), #selector(openConsole)))
-        menu.addItem(actionItem(text("Refresh Status", "\u{5237}\u{65B0}\u{72B6}\u{6001}"), #selector(refreshStatusAction)))
         menu.addItem(NSMenuItem.separator())
 
-        let attentionRoot = NSMenuItem(title: text("Needs Attention", "\u{9700}\u{8981}\u{5904}\u{7406}"), action: nil, keyEquivalent: "")
-        attentionRoot.submenu = attentionChannelsMenu()
-        menu.addItem(attentionRoot)
+        // 接产品的两样东西（base URL + key）一次拿走，不必再翻通道子菜单。
+        menu.addItem(actionItem(text("Copy Access Config", "复制接入配置"), #selector(copyAccessConfig)))
+        menu.addItem(disabledItem(lastState["openAIBaseUrl"] as? String ?? "http://127.0.0.1:8787/v1"))
 
-        let allChannelsRoot = NSMenuItem(title: text("All Channels", "\u{5168}\u{90E8}\u{901A}\u{9053}"), action: nil, keyEquivalent: "")
-        allChannelsRoot.submenu = allChannelsMenu()
-        menu.addItem(allChannelsRoot)
-
+        let defaultModelRoot = NSMenuItem(title: defaultModelRootTitle(), action: nil, keyEquivalent: "")
+        defaultModelRoot.submenu = defaultModelMenu()
+        menu.addItem(defaultModelRoot)
         menu.addItem(NSMenuItem.separator())
 
-        let commonRoot = NSMenuItem(title: text("Common Actions", "\u{5E38}\u{7528}\u{64CD}\u{4F5C}"), action: nil, keyEquivalent: "")
-        commonRoot.submenu = commonActionsMenu()
-        menu.addItem(commonRoot)
+        // 两个管理入口，按对象分：通道、来源。
+        let channelsRoot = NSMenuItem(title: channelsRootTitle(), action: nil, keyEquivalent: "")
+        channelsRoot.submenu = channelsMenu()
+        menu.addItem(channelsRoot)
 
-        let sourceRoot = NSMenuItem(title: text("Model Sources", "\u{6A21}\u{578B}\u{6765}\u{6E90}"), action: nil, keyEquivalent: "")
+        let sourceRoot = NSMenuItem(title: modelSourcesRootTitle(), action: nil, keyEquivalent: "")
         sourceRoot.submenu = modelSourcesMenu()
         menu.addItem(sourceRoot)
+        menu.addItem(NSMenuItem.separator())
 
-        let settingsRoot = NSMenuItem(title: text("Advanced Settings", "\u{9AD8}\u{7EA7}\u{8BBE}\u{7F6E}"), action: nil, keyEquivalent: "")
+        menu.addItem(actionItem(text("Refresh Status", "刷新状态"), #selector(refreshStatusAction)))
+        menu.addItem(actionItem(text("Test All Channels (uses quota)", "测试全部通道（消耗额度）"), #selector(testAllChannels)))
+        menu.addItem(actionItem(text("Open Console", "打开控制台"), #selector(openConsole)))
+        menu.addItem(NSMenuItem.separator())
+
+        let settingsRoot = NSMenuItem(title: text("Settings", "设置"), action: nil, keyEquivalent: "")
         settingsRoot.submenu = settingsMenu()
         menu.addItem(settingsRoot)
+        menu.addItem(actionItem(text("Quit", "退出"), #selector(quit)))
+    }
 
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(actionItem(text("Quit", "\u{9000}\u{51FA}"), #selector(quit)))
+    private func channelsRootTitle() -> String {
+        let channels = channelSummaries()
+        let attention = channels.filter { level in
+            let health = channelHealthLevel(level)
+            return health == .error || health == .unstable
+        }.count
+        if attention > 0 {
+            return text("Channels (\(channels.count) · \(attention) need attention)", "通道（\(channels.count) · \(attention) 需处理）")
+        }
+        return text("Channels (\(channels.count))", "通道（\(channels.count)）")
+    }
+
+    private func defaultModelRootTitle() -> String {
+        let selected = lastState["defaultModel"] as? String ?? ""
+        return selected.isEmpty
+            ? text("Default Model", "默认模型")
+            : text("Default Model: \(selected)", "默认模型：\(selected)")
+    }
+
+    private func modelSourcesRootTitle() -> String {
+        let providers = lastState["providers"] as? [[String: Any]] ?? []
+        let models = lastState["availableModelDetails"] as? [[String: Any]] ?? []
+        let contributing = Set(models.compactMap { $0["providerId"] as? String }).count
+        return text("Model Sources (\(contributing)/\(providers.count))", "模型来源（\(contributing)/\(providers.count)）")
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -327,49 +356,51 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
     }
 
-    private func attentionChannelsMenu() -> NSMenu {
+    // 以前这里是两个顶层入口：「需要处理」和「全部通道」。它们查的是同一份数据、
+    // 打开的是同一个子菜单，区别只是一个 filter，却占了两行并让人以为是两件事。
+    // 合成一个：需要处理的排在最上面并保持醒目，其余按可用且快的顺序排。
+    private func channelsMenu() -> NSMenu {
         let menu = NSMenu()
-        let channels = sortedChannelSummaries().filter {
+        menu.addItem(actionItem(text("Generate New Channel", "生成新通道"), #selector(generateKey)))
+        menu.addItem(actionItem(text("Export All Keys", "导出全部 Key"), #selector(exportKeys)))
+
+        let channels = channelSummaries()
+        guard !channels.isEmpty else {
+            menu.addItem(NSMenuItem.separator())
+            menu.addItem(disabledItem(text("No local channels", "没有本地通道")))
+            return menu
+        }
+
+        let needsAttention = sortedChannelSummaries().filter {
             let level = channelHealthLevel($0)
             return level == .error || level == .unstable
         }
-        guard !channels.isEmpty else {
-            menu.addItem(disabledItem(text("No channels need attention", "\u{6CA1}\u{6709}\u{9700}\u{8981}\u{5904}\u{7406}\u{7684}\u{901A}\u{9053}")))
-            return menu
+        let attentionKeys = Set(needsAttention.map { $0.key })
+        let rest = allChannelSummariesForChoosing().filter { !attentionKeys.contains($0.key) }
+
+        if !needsAttention.isEmpty {
+            menu.addItem(NSMenuItem.separator())
+            menu.addItem(disabledItem(text("Needs attention", "需要处理")))
+            for channel in needsAttention {
+                menu.addItem(channelItem(channel))
+            }
         }
-        for channel in channels {
-            let item = NSMenuItem(title: channelTitle(channel), action: nil, keyEquivalent: "")
-            item.submenu = localChannelMenu(channel)
-            menu.addItem(item)
+        if !rest.isEmpty {
+            menu.addItem(NSMenuItem.separator())
+            if !needsAttention.isEmpty {
+                menu.addItem(disabledItem(text("Working", "正常")))
+            }
+            for channel in rest {
+                menu.addItem(channelItem(channel))
+            }
         }
         return menu
     }
 
-    private func allChannelsMenu() -> NSMenu {
-        let menu = NSMenu()
-        let channels = allChannelSummariesForChoosing()
-        guard !channels.isEmpty else {
-            menu.addItem(disabledItem(text("No local channels", "\u{6CA1}\u{6709}\u{672C}\u{5730}\u{901A}\u{9053}")))
-            return menu
-        }
-        for channel in channels {
-            let item = NSMenuItem(title: channelTitle(channel), action: nil, keyEquivalent: "")
-            item.submenu = localChannelMenu(channel)
-            menu.addItem(item)
-        }
-        return menu
-    }
-
-    private func commonActionsMenu() -> NSMenu {
-        let menu = NSMenu()
-        let baseURL = lastState["openAIBaseUrl"] as? String ?? "http://127.0.0.1:8787/v1"
-        menu.addItem(actionItem(text("Copy Base URL", "\u{590D}\u{5236} Base URL"), #selector(copyBaseURL)))
-        menu.addItem(disabledItem(baseURL))
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(actionItem(text("Generate New Channel", "\u{751F}\u{6210}\u{65B0}\u{901A}\u{9053}"), #selector(generateKey)))
-        menu.addItem(actionItem(text("Export All Keys", "\u{5BFC}\u{51FA}\u{5168}\u{90E8} Key"), #selector(exportKeys)))
-        menu.addItem(actionItem(text("Test All Channels (calls models)", "\u{6D4B}\u{8BD5}\u{5168}\u{90E8}\u{901A}\u{9053}\u{FF08}\u{4F1A}\u{8C03}\u{7528}\u{6A21}\u{578B}\u{FF09}"), #selector(testAllChannels)))
-        return menu
+    private func channelItem(_ channel: ChannelSummary) -> NSMenuItem {
+        let item = NSMenuItem(title: channelTitle(channel), action: nil, keyEquivalent: "")
+        item.submenu = localChannelMenu(channel)
+        return item
     }
 
     private func channelSummaries() -> [ChannelSummary] {
@@ -558,34 +589,72 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
     }
 
-    private func modelMenu() -> NSMenu {
-        let modelMenu = NSMenu()
-        let selected = lastState["defaultModel"] as? String ?? "gpt-5.4-mini"
+    // 选模型原本有两套：默认路由用平铺的一长串（现在有 36 个模型，一屏放不下），
+    // 通道指定模型用按来源分组的。两处数据源和逻辑相同，合成一个分组选择器，
+    // 调用方只提供"选中的是谁"和"点了之后干什么"。
+    private func modelPickerMenu(
+        selected: String?,
+        action: Selector,
+        representedObject: (String) -> Any
+    ) -> NSMenu {
+        let menu = NSMenu()
         let models = availableModelInfos()
         let visibleModels = showFreeModelsOnly ? models.filter { $0.free } : models
 
-        let freeOnly = NSMenuItem(title: text("Only Show Free Models", "\u{53EA}\u{663E}\u{793A}\u{514D}\u{8D39}\u{6A21}\u{578B}"), action: #selector(toggleFreeModelsOnly), keyEquivalent: "")
+        let freeOnly = NSMenuItem(title: text("Only Show Free Models", "只显示免费模型"), action: #selector(toggleFreeModelsOnly), keyEquivalent: "")
         freeOnly.target = self
         freeOnly.state = showFreeModelsOnly ? .on : .off
-        modelMenu.addItem(freeOnly)
-        modelMenu.addItem(NSMenuItem.separator())
+        menu.addItem(freeOnly)
+        menu.addItem(NSMenuItem.separator())
 
-        if visibleModels.isEmpty {
-            modelMenu.addItem(disabledItem(showFreeModelsOnly ? text("No free models", "\u{6CA1}\u{6709}\u{514D}\u{8D39}\u{6A21}\u{578B}") : text("No available models", "\u{6CA1}\u{6709}\u{53EF}\u{9009}\u{6A21}\u{578B}")))
-            return modelMenu
+        guard !visibleModels.isEmpty else {
+            menu.addItem(disabledItem(showFreeModelsOnly
+                ? text("No free models", "没有免费模型")
+                : text("No available models", "没有可选模型")))
+            return menu
         }
 
-        for model in visibleModels {
-            let suffix = model.free ? " - free" : ""
-            let item = NSMenuItem(title: "\(model.id)\(suffix)", action: #selector(selectModel(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = model.id
-            item.state = model.id == selected ? .on : .off
-            modelMenu.addItem(item)
+        let grouped = Dictionary(grouping: visibleModels) { model in
+            providerShortName(providerId: model.providerId, modelId: model.id)
         }
-        modelMenu.addItem(NSMenuItem.separator())
-        modelMenu.addItem(disabledItem(text("Current: \(selected)", "\u{5F53}\u{524D}\u{FF1A}\(selected)")))
-        return modelMenu
+        for group in orderedModelGroups(grouped.keys) {
+            let entries = (grouped[group] ?? []).sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
+            let root = NSMenuItem(title: "\(group) (\(entries.count))", action: nil, keyEquivalent: "")
+            let submenu = NSMenu()
+            for model in entries {
+                let freeSuffix = model.free ? " - \(text("free", "免费"))" : ""
+                let item = NSMenuItem(title: "\(model.id)\(freeSuffix)", action: action, keyEquivalent: "")
+                item.target = self
+                item.state = model.id == selected ? .on : .off
+                item.representedObject = representedObject(model.id)
+                submenu.addItem(item)
+            }
+            root.submenu = submenu
+            menu.addItem(root)
+        }
+        return menu
+    }
+
+    private func orderedModelGroups<S: Sequence>(_ groups: S) -> [String] where S.Element == String {
+        let groupOrder = [
+            "Codex", "Claude Code", "OpenCode", "Antigravity",
+            "Grok", "Qoder", "WorkBuddy", "WorkBuddy AI",
+            text("Upstream", "上游")
+        ]
+        return groups.sorted { left, right in
+            let leftIndex = groupOrder.firstIndex(of: left) ?? groupOrder.count
+            let rightIndex = groupOrder.firstIndex(of: right) ?? groupOrder.count
+            if leftIndex != rightIndex { return leftIndex < rightIndex }
+            return left.localizedStandardCompare(right) == .orderedAscending
+        }
+    }
+
+    private func defaultModelMenu() -> NSMenu {
+        modelPickerMenu(
+            selected: lastState["defaultModel"] as? String,
+            action: #selector(selectModel(_:)),
+            representedObject: { $0 }
+        )
     }
 
     private func modelSourcesMenu() -> NSMenu {
@@ -821,11 +890,7 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate, NSMenuDelegate
 
     private func localChannelMenu(_ channel: ChannelSummary) -> NSMenu {
         let menu = NSMenu()
-        if showKeys {
-            menu.addItem(disabledItem(channel.key))
-        } else {
-            menu.addItem(disabledItem(mask(channel.key)))
-        }
+        menu.addItem(disabledItem(mask(channel.key)))
         menu.addItem(disabledItem(text("Model: \(channel.displayModel)", "\u{6A21}\u{578B}\u{FF1A}\(channel.displayModel)")))
         menu.addItem(disabledItem(text("Last test: \(lastTestTimeText(channel.lastTestAt))", "\u{6700}\u{8FD1}\u{6D4B}\u{8BD5}\u{FF1A}\(lastTestTimeText(channel.lastTestAt))")))
         menu.addItem(disabledItem(text("Status: \(channelStatusDetail(channel))", "\u{72B6}\u{6001}\u{FF1A}\(channelStatusDetail(channel))")))
@@ -865,63 +930,26 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate, NSMenuDelegate
     }
 
     private func keyModelAssignmentMenu(key: String, assignedModel: String?) -> NSMenu {
-        let menu = NSMenu()
-        let models = availableModelInfos()
-
-        if models.isEmpty {
-            menu.addItem(disabledItem(text("No available models", "\u{6CA1}\u{6709}\u{53EF}\u{9009}\u{6A21}\u{578B}")))
-            return menu
-        }
-
-        let grouped = Dictionary(grouping: models) { model in
-            providerShortName(providerId: model.providerId, modelId: model.id)
-        }
-        let groupOrder = ["Codex", "Claude Code", "OpenCode", "Antigravity", text("Upstream", "\u{4E0A}\u{6E38}")]
-        let orderedGroups = grouped.keys.sorted { left, right in
-            let leftIndex = groupOrder.firstIndex(of: left) ?? groupOrder.count
-            let rightIndex = groupOrder.firstIndex(of: right) ?? groupOrder.count
-            if leftIndex != rightIndex { return leftIndex < rightIndex }
-            return left.localizedStandardCompare(right) == .orderedAscending
-        }
-
-        for group in orderedGroups {
-            let root = NSMenuItem(title: group, action: nil, keyEquivalent: "")
-            let submenu = NSMenu()
-            for model in (grouped[group] ?? []).sorted(by: { $0.id.localizedStandardCompare($1.id) == .orderedAscending }) {
-                let freeSuffix = model.free ? " - \(text("free", "\u{514D}\u{8D39}"))" : ""
-                let title = "\(model.displayName ?? model.id)\(freeSuffix)"
-                let item = NSMenuItem(title: title, action: #selector(assignKeyToSelectedModel(_:)), keyEquivalent: "")
-                item.target = self
-                item.state = model.id == assignedModel ? .on : .off
-                item.representedObject = [
-                    "apiKey": key,
-                    "model": model.id
-                ]
-                submenu.addItem(item)
-            }
-            root.submenu = submenu
-            menu.addItem(root)
-        }
-        return menu
+        modelPickerMenu(
+            selected: assignedModel,
+            action: #selector(assignKeyToSelectedModel(_:)),
+            representedObject: { ["apiKey": key, "model": $0] }
+        )
     }
 
     private func settingsMenu() -> NSMenu {
         let settings = NSMenu()
-        let defaultModelRoot = NSMenuItem(title: text("Default Fallback Route", "\u{9ED8}\u{8BA4}\u{5907}\u{7528}\u{8DEF}\u{7531}"), action: nil, keyEquivalent: "")
-        defaultModelRoot.submenu = modelMenu()
-        settings.addItem(defaultModelRoot)
-
-        let languageRoot = NSMenuItem(title: text("Language", "\u{8BED}\u{8A00}"), action: nil, keyEquivalent: "")
+        let languageRoot = NSMenuItem(title: text("Language", "语言"), action: nil, keyEquivalent: "")
         languageRoot.submenu = languageMenu()
         settings.addItem(languageRoot)
         settings.addItem(NSMenuItem.separator())
-        settings.addItem(actionItem(text("Open Config File", "\u{6253}\u{5F00}\u{914D}\u{7F6E}\u{6587}\u{4EF6}"), #selector(openConfig)))
-        settings.addItem(actionItem(text("Open Audit Log", "\u{6253}\u{5F00}\u{5BA1}\u{8BA1}\u{65E5}\u{5FD7}"), #selector(openAuditLog)))
+        settings.addItem(actionItem(text("Open Config File", "打开配置文件"), #selector(openConfig)))
+        settings.addItem(actionItem(text("Open Audit Log", "打开审计日志"), #selector(openAuditLog)))
         settings.addItem(NSMenuItem.separator())
-        settings.addItem(actionItem(text("Restart LocalBrain", "\u{91CD}\u{542F} LocalBrain"), #selector(restartServer)))
-        settings.addItem(actionItem(text("Stop This Service", "\u{505C}\u{6B62}\u{672C}\u{6B21}\u{542F}\u{52A8}\u{7684}\u{670D}\u{52A1}"), #selector(stopOwnedServer)))
+        settings.addItem(actionItem(text("Restart LocalBrain", "重启 LocalBrain"), #selector(restartServer)))
+        settings.addItem(actionItem(text("Stop This Service", "停止本次启动的服务"), #selector(stopOwnedServer)))
         settings.addItem(NSMenuItem.separator())
-        settings.addItem(actionItem(text("Reset All Channel Keys...", "\u{91CD}\u{7F6E}\u{5168}\u{90E8}\u{901A}\u{9053} Key..."), #selector(replaceKey)))
+        settings.addItem(actionItem(text("Reset All Channel Keys...", "重置全部通道 Key..."), #selector(replaceKey)))
         return settings
     }
 
@@ -1034,9 +1062,19 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate, NSMenuDelegate
         refreshState()
     }
 
-    @objc private func copyBaseURL() {
-        let value = lastState["openAIBaseUrl"] as? String ?? "http://127.0.0.1:8787/v1"
-        copy(value)
+    // 接一个本地应用要的就是这两行。以前 base URL 在「常用操作」、key 要再翻进
+    // 某个通道的子菜单，两样东西分在两处。
+    @objc private func copyAccessConfig() {
+        let baseURL = lastState["openAIBaseUrl"] as? String ?? "http://127.0.0.1:8787/v1"
+        guard let channel = recommendedChannel() ?? allChannelSummariesForChoosing().first else {
+            copy("OPENAI_BASE_URL=\(baseURL)")
+            showAlert(
+                title: text("Base URL copied", "已复制 Base URL"),
+                message: text("No channel key exists yet. Use Channels > Generate New Channel first.", "还没有通道 Key。先用「通道 → 生成新通道」创建一个。")
+            )
+            return
+        }
+        copy("OPENAI_BASE_URL=\(baseURL)\nOPENAI_API_KEY=\(channel.key)")
     }
 
     @objc private func copyKey(_ sender: NSMenuItem) {
@@ -1047,11 +1085,6 @@ final class LocalBrainStatusApp: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
         guard let index = sender.representedObject as? Int, keys.indices.contains(index) else { return }
         copy(keys[index])
-    }
-
-    @objc private func toggleKeys() {
-        showKeys.toggle()
-        rebuildMenu()
     }
 
     @objc private func toggleFreeModelsOnly() {
